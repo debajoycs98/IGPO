@@ -1,0 +1,1 @@
+# /root/miniconda3/lib/python3.10/site-packages/zhenjin_utils/ossutil/zhenjin-ossutil64 cp -r -i anon oss://zhenjin-huggingface/models/GAIR/DeepResearcher-7b/ /root/DeepResearcher-7b/

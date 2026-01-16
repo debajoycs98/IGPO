@@ -1,0 +1,1 @@
+# /home/yingzhenzhe/ossutil64 cp -f -r ../FactAgent/ oss://yzz123456/FactAgent/ --config-file /home/yingzhenzhe/.ossutilconfig
