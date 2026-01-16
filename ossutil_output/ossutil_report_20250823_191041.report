@@ -1,1 +1,0 @@
-# /root/miniconda3/lib/python3.10/site-packages/zhenjin_utils/ossutil/zhenjin-ossutil64 cp -r -i anon oss://zhenjin-huggingface/models/Qwen/Qwen3-8B/ /root/Qwen3-8B/

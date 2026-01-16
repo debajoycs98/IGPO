@@ -109,138 +109,24 @@ def compute_gae_advantage_return(
     return advantages, returns
 
 
-
-
-import torch
-import numpy as np
-from collections import defaultdict
-
-def compute_grpo_discounted_advantage(
-    token_level_rewards: torch.Tensor,
-    response_mask: torch.Tensor,
-    index: np.ndarray,
-    gamma: float = 0.5,
-    epsilon: float = 1e-6,
-    norm_adv_by_std_in_grpo: bool = True,
-):
-    """
-    为 GRPO 计算带有折扣奖励的优势函数 (Advantage)。
-    
-    每个词元的回报 (return) R_t 通过从序列末尾向前递归计算：
-    R_t = r_t + gamma * R_{t+1}
-
-    Args:
-        token_level_rewards: `(torch.Tensor)`
-            形状为 (bs, response_length) 的每个词元的即时奖励。
-        response_mask: `(torch.Tensor)`
-            形状为 (bs, response_length) 的响应序列掩码。
-        index: `(np.ndarray)`
-            用于将样本分组的提示 (prompt) 索引数组。
-        gamma: `(float)`
-            未来奖励的折扣因子，根据您的要求设为 0.5。
-        norm_adv_by_std_in_grpo: (bool)
-            是否通过标准差来缩放 GRPO 优势。
-            若为 True，则优势会被标准差缩放（原始 GRPO 的做法）。
-            若为 False，则不进行缩放（类似 Dr.GRPO 的做法 https://arxiv.org/abs/2503.20783）。
-
-    Returns:
-        advantages: `(torch.Tensor)` 形状为 (bs, response_length)
-            经过基线扣除和归一化后的每个词元的优势值。
-        returns: `(torch.Tensor)` 形状为 (bs, response_length)
-            每个词元的折扣累积奖励 (G_t)。
-    """
-    bsz, seq_len = token_level_rewards.shape
-    device = token_level_rewards.device
-
-    # 1. 计算每个词元的折扣累积奖励 (returns)
-    #    采用从序列末尾到开头的反向递归方式。
-    discounted_returns = torch.zeros_like(token_level_rewards)
-    # 初始化下一个时间步的回报为0
-    next_return = torch.zeros(bsz, device=device)
-    
-    for t in reversed(range(seq_len)):
-        # 获取当前时间步的奖励和掩码
-        current_reward = token_level_rewards[:, t]
-        current_mask = response_mask[:, t]
-        
-        # 计算当前时间步的回报 R_t = r_t + gamma * R_{t+1}
-        current_return = current_reward + gamma * next_return
-        
-        # 存储计算出的回报
-        discounted_returns[:, t] = current_return
-        
-        # 更新下一个时间步的回报，并应用掩码。
-        # 如果当前词元是填充符 (mask=0)，其回报不会影响到前一个词元。
-        next_return = current_return * current_mask
-
-    # 2. 计算用于归一化的基线 (mean) 和标准差 (std)
-    #    我们使用每个序列的总回报 R_0 (即第一个时间步的回报) 作为其“得分”来进行比较。
-    scores = discounted_returns[:, 0].clone()
-
-    id2score = defaultdict(list)
-    id2mean = {}
-    id2std = {}
-
-    with torch.no_grad():
-        for i in range(bsz):
-            id2score[index[i]].append(scores[i])
-        
-        for idx in id2score:
-            group_scores = torch.tensor(id2score[idx], device=device)
-            if len(group_scores) <= 1:
-                # 如果组内只有一个样本，其优势为0。
-                # 将均值设为样本自身的值，标准差设为1以避免除零。
-                id2mean[idx] = group_scores.mean() if len(group_scores) == 1 else torch.tensor(0.0, device=device)
-                id2std[idx] = torch.tensor(1.0, device=device)
-            else:
-                id2mean[idx] = group_scores.mean()
-                id2std[idx] = group_scores.std()
-
-    # 3. 通过从回报中减去基线来计算优势
-    advantages = torch.zeros_like(discounted_returns)
-    for i in range(bsz):
-        idx = index[i]
-        mean_baseline = id2mean[idx]
-        std_dev = id2std[idx]
-        
-        # 优势 = 回报 - 基线
-        # A_t = R_t - E[R_0]
-        # 我们使用同一组提示下所有样本总回报 R_0 的均值作为基线。
-        advantages[i] = discounted_returns[i] - mean_baseline
-        
-        if norm_adv_by_std_in_grpo:
-            # 根据同一组总回报的标准差进行归一化
-            advantages[i] /= (std_dev + epsilon)
-
-    # 4. 对最终结果应用掩码，确保填充部分的值为0
-    advantages = advantages * response_mask
-    final_returns = discounted_returns * response_mask
-
-    return advantages, final_returns
-
-
-
-
-
-from collections import defaultdict
-import numpy as np
-import torch
-
-# NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
 # NOTE(sgm): this implementation only consider outcome supervision, where the reward is a scalar.
 def compute_grpo_outcome_advantage(
     token_level_rewards: torch.Tensor,
     response_mask: torch.Tensor,
     index: np.ndarray,
     epsilon: float = 1e-6,
-    norm_adv_by_std_in_grpo: str = True,
+    norm_adv_by_std_in_grpo: bool = True,
+    gamma: float = 1.0,
 ):
     """
-    为 GRPO 计算带有折扣奖励的优势函数 (Advantage)。
-    这个修改后的版本会为每个词元位置计算独立的均值和方差作为基线。
+    为 GRPO 计算优势函数 (Advantage)。
     
-    每个词元的回报 (return) R_t 通过从序列末尾向前递归计算：
-    R_t = r_t + gamma * R_{t+1}
+    计算顺序：先进行组内全局归一化，再计算折扣累积回报。
+    
+    步骤：
+    1. 对每个 group 内的所有 rewards 值计算全局均值和标准差
+    2. 归一化：normalized_rewards = (rewards - mean) / (std + epsilon)
+    3. 使用归一化后的 rewards 计算折扣累积回报：R_t = r_t + gamma * R_{t+1}
 
     Args:
         token_level_rewards: `(torch.Tensor)`
@@ -249,88 +135,87 @@ def compute_grpo_outcome_advantage(
             形状为 (bs, response_length) 的响应序列掩码。
         index: `(np.ndarray)`
             用于将样本分组的提示 (prompt) 索引数组。
-        gamma: `(float)`
-            未来奖励的折扣因子。
         epsilon: `(float)`
             用于在归一化时防止除以零的小常数。
         norm_adv_by_std_in_grpo: (bool)
-            是否通过标准差来缩放 GRPO 优势。
-            若为 True，则优势会被标准差缩放（原始 GRPO 的做法）。
-            若为 False，则不进行缩放（类似 Dr.GRPO 的做法 https://arxiv.org/abs/2503.20783）。
+            是否通过标准差来缩放优势。
+            若为 True，则除以标准差（原始 GRPO 的做法）。
+            若为 False，则不进行缩放（类似 Dr.GRPO 的做法）。
+        gamma: (float)
+            折扣因子，用于计算折扣累积回报 R_t = r_t + gamma * R_{t+1}。
+            默认值为 1.0（无折扣）。
 
     Returns:
         advantages: `(torch.Tensor)` 形状为 (bs, response_length)
-            经过基线扣除和归一化后的每个词元的优势值。
+            经过归一化和折扣累积后的优势值。
         returns: `(torch.Tensor)` 形状为 (bs, response_length)
-            每个词元的折扣累积奖励 (G_t)。
+            折扣累积回报。
     """
     bsz, seq_len = token_level_rewards.shape
     device = token_level_rewards.device
-    gamma = 1.0
 
-    # 1. 计算每个词元的折扣累积奖励 (returns)
-    #    采用从序列末尾到开头的反向递归方式。
-    discounted_returns = torch.zeros_like(token_level_rewards)
+    # ========== Step 1: 组内全局归一化 ==========
+    # 按 index 将所有样本的 token_level_rewards 分组，
+    # 对整个 group 的所有 rewards 值计算一个全局均值和标准差
+    
+    id2indices = defaultdict(list)  # 记录每个组包含哪些样本索引
+    id2mean = {}  # 每个组的全局均值 (scalar)
+    id2std = {}   # 每个组的全局标准差 (scalar)
+
+    with torch.no_grad():
+        # 首先，按 index 将样本索引分组
+        for i in range(bsz):
+            id2indices[index[i]].append(i)
+        
+        # 为每个组计算全局均值和标准差
+        for idx, sample_indices in id2indices.items():
+            # 收集该组内所有样本的所有 rewards 值
+            group_rewards = []
+            for i in sample_indices:
+                # 只收集有效位置（mask=1）的 rewards
+                valid_rewards = token_level_rewards[i][response_mask[i] == 1]
+                group_rewards.append(valid_rewards)
+            
+            # 将所有 rewards 拼接成一个一维张量
+            all_rewards = torch.cat(group_rewards, dim=0)  # (total_valid_tokens,)
+            
+            if all_rewards.numel() <= 1:
+                # 如果只有一个有效值，标准差设为1
+                id2mean[idx] = all_rewards.mean() if all_rewards.numel() == 1 else torch.tensor(0.0, device=device)
+                id2std[idx] = torch.tensor(1.0, device=device)
+            else:
+                # 计算全局均值和标准差
+                id2mean[idx] = all_rewards.mean()  # scalar
+                id2std[idx] = all_rewards.std()    # scalar
+
+    # 对 token_level_rewards 进行全局归一化
+    normalized_rewards = torch.zeros_like(token_level_rewards)
+    for i in range(bsz):
+        idx = index[i]
+        mean_val = id2mean[idx]  # scalar
+        std_val = id2std[idx]    # scalar
+        
+        # 归一化：(rewards - mean) / (std + epsilon)
+        normalized_rewards[i] = token_level_rewards[i] - mean_val
+        if norm_adv_by_std_in_grpo:
+            normalized_rewards[i] = normalized_rewards[i] / (std_val + epsilon)
+
+    # ========== Step 2: 计算折扣累积回报 ==========
+    # 使用归一化后的 rewards 计算 R_t = r_t + gamma * R_{t+1}
+    
+    discounted_returns = torch.zeros_like(normalized_rewards)
     next_return = torch.zeros(bsz, device=device)
     
     for t in reversed(range(seq_len)):
-        current_reward = token_level_rewards[:, t]
+        current_reward = normalized_rewards[:, t]
         current_mask = response_mask[:, t]
         current_return = current_reward + gamma * next_return
         discounted_returns[:, t] = current_return
         next_return = current_return * current_mask
 
-
-    # 2. 计算每个“词元位置”的基线 (mean) 和标准差 (std)
-    #    我们按 index 将所有样本的 discounted_returns 序列分组，
-    #    然后计算每个时间步 t 的均值 E[R_t] 和标准差 Std(R_t)。
-    
-    id2returns = defaultdict(list)
-    id2mean = {}
-    id2std = {}
-
-    with torch.no_grad():
-        # 首先，按 index 将所有回报序列分组
-        for i in range(bsz):
-            id2returns[index[i]].append(discounted_returns[i])
-        
-        # 接下来，为每个组计算其内部每个 token 位置的均值和方差
-        for idx, group_returns_list in id2returns.items():
-            # 将列表中的所有回报张量堆叠成一个 (group_size, seq_len) 的新张量
-            group_returns_tensor = torch.stack(group_returns_list, dim=0)
-            
-            if group_returns_tensor.shape[0] <= 1:
-                # 如果组内只有一个样本，其优势为0。
-                # 均值是其自身，标准差设为1以避免除零。
-                id2mean[idx] = group_returns_tensor.mean(dim=0)
-                id2std[idx] = torch.ones(seq_len, device=device)
-            else:
-                # 沿着 group 维度（dim=0）计算每个 token 位置的均值和方差
-                id2mean[idx] = group_returns_tensor.mean(dim=0)
-                id2std[idx] = group_returns_tensor.std(dim=0)
-
-    # 3. 通过从回报中减去“每个位置的”基线来计算优势
-    advantages = torch.zeros_like(discounted_returns)
-    for i in range(bsz):
-        idx = index[i]
-        # 获取对应组的、形状为 (seq_len,) 的均值和方差向量
-        mean_baseline = id2mean[idx]
-        # std_dev = id2std[idx]
-        
-        # 优势 = 回报 - 对应位置的基线
-        # A_t = R_t - E_group[R_t]
-        advantages[i] = discounted_returns[i] - mean_baseline
-        
-        # if norm_adv_by_std_in_grpo:
-        #     # 根据每个位置的标准差进行归一化
-        #     advantages[i] /= (std_dev + epsilon)
-
-
-    # 4. 对最终结果应用掩码，确保填充部分的值为0
-    advantages = advantages * response_mask
+    # ========== Step 3: 应用掩码 ==========
+    advantages = discounted_returns * response_mask
     final_returns = discounted_returns * response_mask
-    
-    print(f"advantages is {advantages}  final_returns is {final_returns}")
 
     return advantages, final_returns
 

@@ -292,17 +292,53 @@ class LLMGenerationManager:
             for _ in range(self.config.n):
                 ground_truths_rolling.append(gt)
 
-        pseudo_resps_with_gt = [self.tokenizer(f"\nNow there's enough information to answer\n</think>\n<answer>\n{ground_truth['ground_truth']}\n</answer><|im_end|>", return_tensors="pt")['input_ids'].tolist()[0] for ground_truth in ground_truths_rolling]
-        for i, resp in enumerate(pseudo_resps_with_gt):
-            # print(f"resp[{i}] length: {len(resp)}, content: {resp[:10]}...")  # 打印前10个token
-            if len(resp) == 0:
-                print(f"❗❗❗ EMPTY at index {i}, ground_truth: '{ground_truths_rolling[i]['ground_truth']}'")
-        len_st = len(self.tokenizer("\nNow there's enough information to answer\n</think>\n<answer>\n", return_tensors="pt")['input_ids'].tolist()[0])
-        len_ed = len(self.tokenizer("\n</answer><|im_end|>", return_tensors="pt")['input_ids'].tolist()[0])
+        # 使用 offset_mapping 精确计算 ground truth 的 token 范围
+        # 避免 subword tokenization 边界效应导致的索引偏差
+        PREFIX = "\nNow there's enough information to answer\n</think>\n<answer>\n"
+        SUFFIX = "\n</answer><|im_end|>"
+        
+        pseudo_resps_with_gt = []
         gt_idx = []
-        for resp_with_gt in pseudo_resps_with_gt:
-            idx = [len_st, len(resp_with_gt) - len_ed]
-            gt_idx.append(idx)
+        
+        for ground_truth in ground_truths_rolling:
+            gt_text = ground_truth['ground_truth']
+            full_text = f"{PREFIX}{gt_text}{SUFFIX}"
+            
+            # 使用 offset_mapping 获取精确的字符-token 映射
+            encoding = self.tokenizer(full_text, return_tensors="pt", return_offsets_mapping=True)
+            token_ids = encoding['input_ids'].tolist()[0]
+            offset_mapping = encoding['offset_mapping'].tolist()[0]  # [(char_start, char_end), ...]
+            
+            pseudo_resps_with_gt.append(token_ids)
+            
+            if len(token_ids) == 0:
+                print(f"❗❗❗ EMPTY token_ids for ground_truth: '{gt_text}'")
+                gt_idx.append([0, 0])
+                continue
+            
+            # 计算 ground truth 在原始字符串中的位置
+            gt_char_start = len(PREFIX)
+            gt_char_end = len(PREFIX) + len(gt_text)
+            
+            # 通过 offset_mapping 找到精确的 token 索引
+            gt_token_start = None
+            gt_token_end = None
+            
+            for token_idx, (char_start, char_end) in enumerate(offset_mapping):
+                # 找到第一个覆盖 gt_char_start 的 token
+                if gt_token_start is None and char_end > gt_char_start:
+                    gt_token_start = token_idx
+                # 找到最后一个覆盖 gt 内容的 token（char_start < gt_char_end）
+                if char_start < gt_char_end and char_end > 0:
+                    gt_token_end = token_idx + 1
+            
+            # 边界检查
+            if gt_token_start is None:
+                gt_token_start = len(token_ids)
+            if gt_token_end is None:
+                gt_token_end = len(token_ids)
+            
+            gt_idx.append([gt_token_start, gt_token_end])
         
 
         for idx, query_content in enumerate(query_contents):
@@ -386,14 +422,14 @@ class LLMGenerationManager:
                         info_gain_rollings_active.batch['attention_mask'], 
                         pad=(0, rollings_active.batch['attention_mask'].shape[1] - info_gain_rollings_active.batch['attention_mask'].shape[1]),
                         mode='constant',
-                        value=self.tokenizer.pad_token_id,
+                        value=0,  # attention_mask 用 0 填充表示 padding 位置
                         )
 
                     info_gain_rollings_active.batch['position_ids'] = F.pad(
                         info_gain_rollings_active.batch['position_ids'], 
                         pad=(0, rollings_active.batch['position_ids'].shape[1] - info_gain_rollings_active.batch['position_ids'].shape[1]),
                         mode='constant',
-                        value=self.tokenizer.pad_token_id,
+                        value=0,  # position_ids 用 0 填充
                         )
                 
                     for i in range(len(activate_list)):
@@ -536,8 +572,11 @@ class LLMGenerationManager:
             #     for message in messages_list:
             #         json.dump(message, f)
             #         f.write('\n')
-        with open(f"/ossfs/workspace/linyang/FactAgent/DeepResearcher/gt_log_probs/training/gt_log_probs_{global_steps}.json", 'w') as f:
-            json.dump({"gt_log_probs_per_turn": gt_log_probs_per_turn, "gt_entropys_per_turn": gt_entropys_per_turn}, f)
+        
+        # 保存 gt_log_probs 到本地输出目录（如果需要调试，可取消注释）
+        # gt_log_probs_path = os.path.join(output_dir, f"gt_log_probs_{global_steps}.json")
+        # with open(gt_log_probs_path, 'w') as f:
+        #     json.dump({"gt_log_probs_per_turn": gt_log_probs_per_turn, "gt_entropys_per_turn": gt_entropys_per_turn}, f)
         
 
         if activate_list != []:

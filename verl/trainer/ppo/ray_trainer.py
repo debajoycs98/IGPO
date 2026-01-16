@@ -217,6 +217,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             response_mask=grpo_calculation_mask,
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+            gamma=gamma,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -759,8 +760,13 @@ class RayPPOTrainer:
                         ground_truths.extend([x.non_tensor_batch["reward_model"]["ground_truth"] for x in test_batch])
                         generation_manager.timing_raw = timing_raw
 
-                        # normalize length
-                        norm_len = len(test_gen_batch) // 16 * 16
+                        # normalize length to be divisible by total GPU count
+                        n_gpus = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+                        if len(test_gen_batch) >= n_gpus:
+                            norm_len = len(test_gen_batch) // n_gpus * n_gpus
+                        else:
+                            # If batch size < n_gpus, keep all data (let downstream handle it)
+                            norm_len = len(test_gen_batch)
                         test_gen_batch = test_gen_batch[:norm_len]
                         ground_truths = ground_truths[:norm_len]
                         ground_truths = [{'ground_truth': gt} for gt in ground_truths]
@@ -1037,7 +1043,11 @@ class RayPPOTrainer:
 #             print(self.train_dataloader.offset)
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
-        """Reorder the data on single controller such that each dp rank gets similar total tokens"""
+        """Reorder the data on single controller such that each dp rank gets similar total tokens
+        
+        Returns:
+            global_idx: torch.Tensor, the reorder indices used to reorder the batch
+        """
         attention_mask = batch.batch["attention_mask"]
         batch_size = attention_mask.shape[0]
         global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1).tolist()  # (train_batch_size,)
@@ -1048,6 +1058,7 @@ class RayPPOTrainer:
         batch.reorder(global_idx)
         global_balance_stats = log_seqlen_unbalance(seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix)
         metrics.update(global_balance_stats)
+        return global_idx
 
         
     def fit(self):
@@ -1193,7 +1204,9 @@ class RayPPOTrainer:
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
                     if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
+                        reorder_idx = self._balance_batch(batch, metrics=metrics)
+                        # 同步重排 info_gain_rewards，确保索引与 batch 对应
+                        info_gain_rewards = [info_gain_rewards[i] for i in reorder_idx.tolist()]
                     
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()

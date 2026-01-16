@@ -137,12 +137,52 @@ def compute_f1(solution_str, ground_truth, data_source, val_type='f1') -> float:
             
     return max_score
 
+def _char_pos_to_token_idx(char_pos, offset_mapping):
+    """
+    根据字符位置找到对应的 token 索引
+    
+    Args:
+        char_pos: 字符位置
+        offset_mapping: tokenizer 返回的 offset_mapping，格式为 [(start, end), ...]
+    
+    Returns:
+        对应的 token 索引
+    """
+    for i, (start, end) in enumerate(offset_mapping):
+        if start <= char_pos < end:
+            return i
+        if char_pos < start:
+            # char_pos 在当前 token 之前的空隙中，返回前一个 token
+            return max(0, i - 1)
+    # 如果超出范围，返回最后一个 token
+    return len(offset_mapping) - 1
+
+
 def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_gain_reward=[], tokenizer=None, is_validation=False):
+    """
+    计算 token 级别的奖励分数
+    
+    使用 tokenizer 的 offset_mapping 功能实现精确的 token-字符位置映射，
+    避免 subword tokenization 导致的索引计算错误。
+    
+    Args:
+        solution_str: 模型生成的完整响应字符串
+        ground_truth: 标准答案
+        data_source: 数据来源
+        val_type: 验证类型 ('f1', 'em', 'noformatf1')
+        info_gain_reward: 每个 turn 的信息增益奖励列表
+        tokenizer: HuggingFace tokenizer
+        is_validation: 是否为验证模式
+    
+    Returns:
+        scores 列表或包含多个指标的字典
+    """
     if tokenizer is None:
         raise ValueError("tokenizer cannot be None")
         
     alpha = 1.0
 
+    # 计算 F1/EM 分数
     if is_validation:
         f1_score = compute_f1(solution_str, ground_truth, data_source, val_type='f1')
         em_score = compute_f1(solution_str, ground_truth, data_source, val_type='em')
@@ -150,79 +190,99 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
     else:
         f1_score = compute_f1(solution_str, ground_truth, data_source, val_type)
     
-    all_tokens = tokenizer.tokenize(solution_str)
-    scores = [0.0] * len(all_tokens)  # Use float array
+    # 使用 offset_mapping 获取精确的 token-字符位置映射
+    encoding = tokenizer(solution_str, return_offsets_mapping=True, add_special_tokens=False)
+    token_ids = encoding['input_ids']
+    offset_mapping = encoding['offset_mapping']  # [(char_start, char_end), ...]
+    
+    tokens_size = len(token_ids)
+    scores = [0.0] * tokens_size
 
-    start_index = 0
-    end_index = 0
-    tokens_size = len(all_tokens)
+    # 如果没有 token，直接返回空 scores
+    if tokens_size == 0:
+        if is_validation:
+            return {"f1": f1_score, "em": em_score, "noformatf1": noformatf1_score, "scores": scores}
+        return scores
 
-    chats = solution_str.split("\n<|im_start|>assistant\n")
-    chats_size = len(chats)
+    # Turn 分隔符
+    separator = "\n<|im_start|>assistant\n"
+    
+    # 找到所有 turn 的起始字符位置
+    turn_start_positions = []  # 每个 turn 内容的起始字符位置
+    turn_end_positions = []    # 每个 turn 内容的结束字符位置
+    
+    # 查找所有分隔符位置
+    sep_positions = []
+    search_pos = 0
+    while True:
+        sep_pos = solution_str.find(separator, search_pos)
+        if sep_pos == -1:
+            break
+        sep_positions.append(sep_pos)
+        search_pos = sep_pos + 1
+    
+    if len(sep_positions) == 0:
+        # 没有分隔符，整个字符串视为一个 turn
+        turn_start_positions = [0]
+        turn_end_positions = [len(solution_str)]
+    else:
+        # 第一个分隔符之前的内容（如果有）
+        if sep_positions[0] > 0:
+            turn_start_positions.append(0)
+            turn_end_positions.append(sep_positions[0])
+        
+        # 每个分隔符之后的 turn
+        for i, sep_pos in enumerate(sep_positions):
+            turn_start = sep_pos + len(separator)
+            turn_start_positions.append(turn_start)
+            
+            # 确定这个 turn 的结束位置
+            if i + 1 < len(sep_positions):
+                turn_end = sep_positions[i + 1]
+            else:
+                turn_end = len(solution_str)
+            turn_end_positions.append(turn_end)
+    
+    chats_size = len(turn_start_positions)
 
-   
-
+    # 如果没有 info_gain_reward 或只有一个 turn，只在最后一个 token 放 f1_score
     if info_gain_reward == [] or chats_size == 1:
         scores[-1] = alpha * f1_score
-        
         if is_validation:
-            return {
-                "f1": f1_score,
-                "em": em_score,
-                "noformatf1": noformatf1_score,
-                "scores": scores,
-            }
-        else:
-            return scores
+            return {"f1": f1_score, "em": em_score, "noformatf1": noformatf1_score, "scores": scores}
+        return scores
+    
+    # 检查 info_gain_reward 长度是否匹配
     if len(info_gain_reward) != chats_size - 1:
-        if chats_size > 10:
-            info_gain_reward.append(0.0)
-        else:
-            with open("/ossfs/workspace/linyang/FactAgent/DeepResearcher/info_gain.py_debug.json", 'a') as f:
-                json.dump({'solution_str': solution_str, 'chats_size': chats_size, 'info_gain_len': len(info_gain_reward), 'info_gain_reward': info_gain_reward, 'chats': chats}, f)
-            print("info_gain.py: turn error")
-            scores[-1] = alpha * f1_score
-            if is_validation:
-                return {
-                    "f1": f1_score,
-                    "em": em_score,
-                    "noformatf1": noformatf1_score,
-                    "scores": scores,
-                }
-            else:
-                return scores
+        print(f"info_gain.py: turn mismatch - chats_size={chats_size}, info_gain_len={len(info_gain_reward)}")
+        # 长度不匹配时，回退到只使用 f1_score
+        scores[-1] = alpha * f1_score
+        if is_validation:
+            return {"f1": f1_score, "em": em_score, "noformatf1": noformatf1_score, "scores": scores}
+        return scores
 
-
-    for i, chat in enumerate(chats):
-        if i == 0:
-            chat_len = len(tokenizer.tokenize(chat))
-            end_index = start_index + chat_len
-            num_tokens_in_slice = end_index - start_index
-            if num_tokens_in_slice > 0:
-                scores[start_index:end_index] = [0] * num_tokens_in_slice
-                scores[end_index - 1] = info_gain_reward[i]
+    # 为每个 turn 的最后一个 token 分配奖励
+    for i in range(chats_size):
+        turn_end_char = turn_end_positions[i]
+        
+        # 找到该 turn 最后一个字符对应的 token 索引
+        # 注意：turn_end_char 是开区间，所以用 turn_end_char - 1
+        if turn_end_char > 0:
+            last_token_idx = _char_pos_to_token_idx(turn_end_char - 1, offset_mapping)
         else:
-            if i < chats_size - 1:
-                chat_len = len(tokenizer.tokenize(chat))
-                start_index = len(tokenizer.tokenize(solution_str.split(chat)[0]))
-                end_index = start_index + chat_len
-                num_tokens_in_slice = end_index - start_index
-                if num_tokens_in_slice > 0:
-                    scores[start_index:end_index] = [0] * num_tokens_in_slice
-                    scores[end_index - 1] = info_gain_reward[i]
-            else:
-                scores[-1] = alpha * f1_score
-    # with open("/ossfs/workspace/linyang/FactAgent/DeepResearcher/info_gain.py.jsonl", 'a') as f:
-    #     f.write(json.dumps({"f1": f1_score, "info_gain_reward": info_gain_reward, "scores": scores}) + '\n')
+            last_token_idx = 0
+        
+        # 确保索引在有效范围内
+        last_token_idx = min(last_token_idx, tokens_size - 1)
+        
+        # 分配奖励
+        if i < chats_size - 1:
+            # 非最后一轮，使用 info_gain_reward
+            scores[last_token_idx] = info_gain_reward[i]
+        else:
+            # 最后一轮，使用 f1_score
+            scores[last_token_idx] = alpha * f1_score
+    
     if is_validation:
-        return {
-            "f1": f1_score,
-            "em": em_score,
-            "noformatf1": noformatf1_score,
-            "scores": scores,
-        }
-    # import math		
-    # for s in scores:
-    #     if math.isnan(s):
-    #         raise ValueError("Find nan in info_gain.py")
+        return {"f1": f1_score, "em": em_score, "noformatf1": noformatf1_score, "scores": scores}
     return scores

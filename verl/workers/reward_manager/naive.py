@@ -72,8 +72,8 @@ class NaiveRewardManager:
 
             extra_info = data_item.non_tensor_batch.get("extra_info", None)
 
-            # info_gain_reward   
-            info_gain_reward = info_gain_rewards[i]
+            # info_gain_reward - 添加空值检查
+            info_gain_reward = info_gain_rewards[i] if info_gain_rewards is not None else []
 
             score = self.compute_score(
                 data_source=data_source,
