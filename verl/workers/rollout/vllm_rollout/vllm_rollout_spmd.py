@@ -266,9 +266,6 @@ class vLLMRollout(BaseRollout):
             for output in outputs:
                 for sample_id in range(len(output.outputs)):
                     response.append(output.outputs[sample_id].token_ids)
-            import json 
-            with open("/ossfs/workspace/linyang/FactAgent/DeepResearcher/spmd_response.json", 'w') as f:
-                json.dump({'type': str(type(response)), 'response': str(response)}, f)
             response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(idx.device)
 
             if self.sampling_params.n > 1 and do_sample:

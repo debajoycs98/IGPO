@@ -49,11 +49,6 @@ class NaiveRollout(BaseRollout):
 
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto) -> DataProto:
-
-        import json
-        with open('/ossfs/workspace/linyang/FactAgent/DeepResearcher/generate_sequences.json', 'a') as f:
-            json.dump('naive_rollout\n', f)
-
         """Generate sequences"""
         idx = prompts.batch["input_ids"]  # (bs, prompt_length)
         attention_mask = prompts.batch["attention_mask"]  # left-padded attention_mask

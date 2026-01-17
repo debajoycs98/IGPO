@@ -226,10 +226,6 @@ class SGLangRollout(BaseRollout):
     @GPUMemoryLogger(role="sglang rollout", logger=logger)
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
-        # if self.config.free_cache_engine:
-        import json
-        with open('/ossfs/workspace/linyang/FactAgent/DeepResearcher/generate_sequences.json', 'a') as f:
-            json.dump('sglang_rollout\n', f)
         idx = prompts.batch["input_ids"]  # (bs, prompt_length)
         # left-padded attention_mask
         attention_mask = prompts.batch["attention_mask"]
