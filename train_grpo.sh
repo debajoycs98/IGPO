@@ -3,13 +3,13 @@
 
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export HYDRA_FULL_ERROR=1
-export project_name="ed-st_baseline"
+export project_name="project_name"
 export RAY_memory_monitor_refresh_ms=0
 export experiment_name="experiment_name"
 export PET_NODE_RANK=0
-export MODEL_PATH="/root/Qwen2.5-3B-Instruct"
+export MODEL_PATH="/root/Qwen2.5-7B-Instruct"
 export OUTPUT='/root/output'
-export EVAL_LOG_PATH='eval_log_3B_ours'
+export EVAL_LOG_PATH='eval_log'
 mkdir -p $OUTPUT
 mkdir -p $EVAL_LOG_PATH
 
@@ -18,14 +18,14 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     data.train_files=./data/train.parquet \
     data.val_files=./data/test_v4.parquet \
     data.train_batch_size=32 \
-    data.max_prompt_length=92301 \
-    data.max_response_length=2000 \
+    data.max_prompt_length=90301 \
+    data.max_response_length=4000 \
     +data.max_model_len=94302 \
     +data.data_writing_path=oss://yzz123456/temp/data_debug/ \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=32 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=512 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
@@ -38,7 +38,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
     actor_rollout_ref.ref.fsdp_config.param_offload=true \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=36864 \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=12288 \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=4 \
     actor_rollout_ref.rollout.temperature=1.0 \
     critic.optim.lr=1e-5 \
