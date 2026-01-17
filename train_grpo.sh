@@ -16,7 +16,7 @@ mkdir -p $EVAL_LOG_PATH
     
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     data.train_files=./data/train.parquet \
-    data.val_files=./data/test_v4.parquet \
+    data.val_files=./data/test.parquet \
     data.train_batch_size=32 \
     data.max_prompt_length=90301 \
     data.max_response_length=4000 \
@@ -54,7 +54,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=20 \
-    trainer.test_freq=4 \
+    trainer.test_freq=5 \
     trainer.validation_data_dir=${EVAL_LOG_PATH} \
     trainer.default_local_dir=${OUTPUT} \
     agent_grpo.n=16 \
