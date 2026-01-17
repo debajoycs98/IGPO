@@ -41,6 +41,8 @@ class GenerationConfig:
     oss_endpoint: str = ''
     system_prompt: Optional[str] = SYSTEM_PROMPT
     codeact_env_disabled: bool = True
+    # info_gain_type: "prob_diff" (概率差) 或 "log_prob_diff" (log概率差)
+    info_gain_type: str = "prob_diff"
     
 
 class LLMGenerationManager:
@@ -478,23 +480,45 @@ class LLMGenerationManager:
             #         f.write('\n')
             
             
-            # pseudo_gen_output_probs = torch.exp(pseudo_gen_output_log_probs.batch['old_log_probs'])
+            # ========== 根据 info_gain_type 计算 info_gain_reward ==========
+            # "prob_diff": 使用概率差 exp(mean(log P_t)) - exp(mean(log P_{t-1}))
+            # "log_prob_diff": 使用 log 概率差 mean(log P_t) - mean(log P_{t-1})
+            
+            info_gain_type = self.config.info_gain_type  # "prob_diff" 或 "log_prob_diff"
             
             if step == 0:
-                gt_probs = {}
+                gt_values = {}  # 存储上一轮的值（概率或log概率，取决于 info_gain_type）
                 for i in activate_list:
-                    # print("print(""pseudo_gen_output_probs[i, gt_idx[i][0]:gt_idx[i][1])",pseudo_gen_output_probs[i, gt_idx[i][0]:gt_idx[i][1]])
-					# cur_prob = torch.prod(pseudo_gen_output_probs[i, gt_idx[i][0]:gt_idx[i][1]]).item() ** (1 / (gt_idx[i][1] - gt_idx[i][0]))
-                    gt_probs[i] = torch.exp(pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]].mean()).item()
-                    gt_log_probs_per_turn[i].append(pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())
+                    log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
+                    mean_log_prob = log_probs.mean().item()
+                    
+                    if info_gain_type == "log_prob_diff":
+                        # 存储 log 概率的均值
+                        gt_values[i] = mean_log_prob
+                    else:  # "prob_diff" (默认)
+                        # 存储概率的几何平均（即 exp(mean(log P))）
+                        gt_values[i] = torch.exp(torch.tensor(mean_log_prob)).item()
+                    
+                    gt_log_probs_per_turn[i].append(log_probs.tolist())
                     gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())
             else:
                 for i in activate_list:
-                    # cur_prob = torch.prod(pseudo_gen_output_probs[i, gt_idx[i][0]:gt_idx[i][1]]).item() ** (1 / (gt_idx[i][1] - gt_idx[i][0]))  
-                    cur_prob = torch.exp(pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]].mean()).item()      
-                    info_gain_rewards[i].append(cur_prob - gt_probs[i])
-                    gt_probs[i] = cur_prob
-                    gt_log_probs_per_turn[i].append(pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())
+                    log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
+                    mean_log_prob = log_probs.mean().item()
+                    
+                    if info_gain_type == "log_prob_diff":
+                        # 使用 log 概率差
+                        cur_value = mean_log_prob
+                        info_gain = cur_value - gt_values[i]
+                    else:  # "prob_diff" (默认)
+                        # 使用概率差
+                        cur_value = torch.exp(torch.tensor(mean_log_prob)).item()
+                        info_gain = cur_value - gt_values[i]
+                    
+                    info_gain_rewards[i].append(info_gain)
+                    gt_values[i] = cur_value
+                    
+                    gt_log_probs_per_turn[i].append(log_probs.tolist())
                     gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())       
 
             gen_output = self._generate_with_gpu_padding(rollings_active)

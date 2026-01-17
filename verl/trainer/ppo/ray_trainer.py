@@ -186,7 +186,7 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True):
+def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, info_gain_norm_mode="joint"):
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch:
         data.batch["response_mask"] = compute_response_mask(data)
@@ -218,6 +218,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             index=data.non_tensor_batch["uid"],
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
             gamma=gamma,
+            info_gain_norm_mode=info_gain_norm_mode,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -650,7 +651,8 @@ class RayPPOTrainer:
             oss_access_key_id=self.config.data.oss_access_key_id,
             oss_access_key_secret=self.config.data.oss_access_key_secret,
             oss_endpoint=self.config.data.oss_endpoint,
-            codeact_env_disabled=self.config.codeact_env_disabled
+            codeact_env_disabled=self.config.codeact_env_disabled,
+            info_gain_type=getattr(self.config.algorithm, 'info_gain_type', 'prob_diff'),
         )
 
         generation_manager = LLMGenerationManager(
@@ -1117,7 +1119,8 @@ class RayPPOTrainer:
             oss_access_key_id=self.config.data.oss_access_key_id,
             oss_access_key_secret=self.config.data.oss_access_key_secret,
             oss_endpoint=self.config.data.oss_endpoint,
-            codeact_env_disabled=self.config.codeact_env_disabled
+            codeact_env_disabled=self.config.codeact_env_disabled,
+            info_gain_type=getattr(self.config.algorithm, 'info_gain_type', 'prob_diff'),
         )
 
         generation_manager = LLMGenerationManager(
@@ -1315,6 +1318,7 @@ class RayPPOTrainer:
                         # compute advantages, executed on the driver process
 
                         norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)  # GRPO adv normalization factor
+                        info_gain_norm_mode = getattr(self.config.algorithm, 'info_gain_norm_mode', 'joint')  # "joint" 或 "separate"
 
                         batch = compute_advantage(
                             batch,
@@ -1324,6 +1328,7 @@ class RayPPOTrainer:
                             num_repeat=self.config.agent_grpo.n,
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
+                            info_gain_norm_mode=info_gain_norm_mode,
                         )
                         # with open("/ossfs/workspace/linyang/FactAgent/DeepResearcher/adv.json", 'a') as f:
                         #     json.dump(batch.batch['advantages'].detach().cpu().tolist(), f, allow_nan=True)

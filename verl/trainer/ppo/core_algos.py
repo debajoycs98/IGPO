@@ -117,107 +117,131 @@ def compute_grpo_outcome_advantage(
     epsilon: float = 1e-6,
     norm_adv_by_std_in_grpo: bool = True,
     gamma: float = 1.0,
+    info_gain_norm_mode: str = "joint",
 ):
     """
-    为 GRPO 计算优势函数 (Advantage)。
+    为 GRPO 计算优势函数 (Advantage)，使用向量化实现提升性能。
     
-    计算顺序：先进行组内全局归一化，再计算折扣累积回报。
-    
-    步骤：
-    1. 对每个 group 内的所有 rewards 值计算全局均值和标准差
-    2. 归一化：normalized_rewards = (rewards - mean) / (std + epsilon)
-    3. 使用归一化后的 rewards 计算折扣累积回报：R_t = r_t + gamma * R_{t+1}
-
     Args:
-        token_level_rewards: `(torch.Tensor)`
-            形状为 (bs, response_length) 的每个词元的即时奖励。
-        response_mask: `(torch.Tensor)`
-            形状为 (bs, response_length) 的响应序列掩码。
-        index: `(np.ndarray)`
-            用于将样本分组的提示 (prompt) 索引数组。
-        epsilon: `(float)`
-            用于在归一化时防止除以零的小常数。
-        norm_adv_by_std_in_grpo: (bool)
-            是否通过标准差来缩放优势。
-            若为 True，则除以标准差（原始 GRPO 的做法）。
-            若为 False，则不进行缩放（类似 Dr.GRPO 的做法）。
-        gamma: (float)
-            折扣因子，用于计算折扣累积回报 R_t = r_t + gamma * R_{t+1}。
-            默认值为 1.0（无折扣）。
+        token_level_rewards: (bs, response_length) 每个词元的即时奖励
+        response_mask: (bs, response_length) 响应序列掩码
+        index: 用于将样本分组的提示索引数组
+        epsilon: 防止除零的小常数
+        norm_adv_by_std_in_grpo: 是否除以标准差
+        gamma: 折扣因子，默认 1.0
+        info_gain_norm_mode: "joint" 或 "separate"
 
     Returns:
-        advantages: `(torch.Tensor)` 形状为 (bs, response_length)
-            经过归一化和折扣累积后的优势值。
-        returns: `(torch.Tensor)` 形状为 (bs, response_length)
-            折扣累积回报。
+        advantages, returns: 均为 (bs, response_length)
     """
     bsz, seq_len = token_level_rewards.shape
     device = token_level_rewards.device
 
-    # ========== Step 1: 组内全局归一化 ==========
-    # 按 index 将所有样本的 token_level_rewards 分组，
-    # 对整个 group 的所有 rewards 值计算一个全局均值和标准差
-    
-    id2indices = defaultdict(list)  # 记录每个组包含哪些样本索引
-    id2mean = {}  # 每个组的全局均值 (scalar)
-    id2std = {}   # 每个组的全局标准差 (scalar)
-
+    # ========== Step 1: 构建掩码 ==========
     with torch.no_grad():
-        # 首先，按 index 将样本索引分组
-        for i in range(bsz):
-            id2indices[index[i]].append(i)
+        valid_lengths = response_mask.sum(dim=1).long()
+        last_valid_pos = torch.clamp(valid_lengths - 1, min=0)
         
-        # 为每个组计算全局均值和标准差
-        for idx, sample_indices in id2indices.items():
-            # 收集该组内所有样本的所有 rewards 值
-            group_rewards = []
-            for i in sample_indices:
-                # 只收集有效位置（mask=1）的 rewards
-                valid_rewards = token_level_rewards[i][response_mask[i] == 1]
-                group_rewards.append(valid_rewards)
-            
-            # 将所有 rewards 拼接成一个一维张量
-            all_rewards = torch.cat(group_rewards, dim=0)  # (total_valid_tokens,)
-            
-            if all_rewards.numel() <= 1:
-                # 如果只有一个有效值，标准差设为1
-                id2mean[idx] = all_rewards.mean() if all_rewards.numel() == 1 else torch.tensor(0.0, device=device)
-                id2std[idx] = torch.tensor(1.0, device=device)
-            else:
-                # 计算全局均值和标准差
-                id2mean[idx] = all_rewards.mean()  # scalar
-                id2std[idx] = all_rewards.std()    # scalar
+        position_indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
+        f1_mask = (position_indices == last_valid_pos.unsqueeze(1)) & (response_mask == 1)
+        ig_mask = (response_mask == 1) & (~f1_mask) & (token_level_rewards != 0)
 
-    # 对 token_level_rewards 进行全局归一化
+    # ========== Step 2: 构建 Group 映射（向量化） ==========
+    # 将 index 转换为连续的 group_id (0, 1, 2, ...)
+    unique_indices, inverse_indices = np.unique(index, return_inverse=True)
+    group_ids = torch.tensor(inverse_indices, device=device, dtype=torch.long)  # (bsz,)
+    num_groups = len(unique_indices)
+    
+    # 扩展 group_ids 到 (bsz, seq_len)
+    group_ids_expanded = group_ids.unsqueeze(1).expand(-1, seq_len)
+
+    # ========== Step 3: 向量化计算组内统计量 ==========
+    def compute_group_stats(mask):
+        """计算每个 group 在 mask 位置的 mean 和 std"""
+        flat_mask = mask.view(-1)
+        flat_rewards = token_level_rewards.view(-1)
+        flat_group_ids = group_ids_expanded.reshape(-1)
+        
+        # 只选取有效位置
+        valid_idx = flat_mask.nonzero(as_tuple=True)[0]
+        if valid_idx.numel() == 0:
+            return torch.zeros(num_groups, device=device), torch.ones(num_groups, device=device)
+        
+        valid_rewards = flat_rewards[valid_idx]
+        valid_groups = flat_group_ids[valid_idx]
+        
+        # 计算 sum 和 count
+        group_sum = torch.zeros(num_groups, device=device).scatter_add_(0, valid_groups, valid_rewards)
+        group_count = torch.zeros(num_groups, device=device).scatter_add_(0, valid_groups, torch.ones_like(valid_rewards))
+        
+        # Mean
+        group_mean = group_sum / group_count.clamp(min=1.0)
+        
+        # Std: 使用 E[(x - mean)^2] 公式
+        expanded_mean = group_mean[valid_groups]
+        sq_diff = (valid_rewards - expanded_mean) ** 2
+        group_sq_sum = torch.zeros(num_groups, device=device).scatter_add_(0, valid_groups, sq_diff)
+        group_var = group_sq_sum / group_count.clamp(min=1.0)
+        group_std = torch.sqrt(group_var + 1e-8)
+        
+        # count <= 1 时，std 设为 1.0
+        group_std = torch.where(group_count <= 1, torch.ones_like(group_std), group_std)
+        
+        return group_mean, group_std
+
+    # ========== Step 4: 向量化归一化 ==========
     normalized_rewards = torch.zeros_like(token_level_rewards)
-    for i in range(bsz):
-        idx = index[i]
-        mean_val = id2mean[idx]  # scalar
-        std_val = id2std[idx]    # scalar
+
+    if info_gain_norm_mode == "separate":
+        # F1 部分
+        f1_mean, f1_std = compute_group_stats(f1_mask)
+        f1_mean_map = f1_mean[group_ids_expanded]
+        f1_std_map = f1_std[group_ids_expanded]
         
-        # 归一化：(rewards - mean) / (std + epsilon)
-        normalized_rewards[i] = token_level_rewards[i] - mean_val
+        norm_f1 = (token_level_rewards - f1_mean_map)
         if norm_adv_by_std_in_grpo:
-            normalized_rewards[i] = normalized_rewards[i] / (std_val + epsilon)
-
-    # ========== Step 2: 计算折扣累积回报 ==========
-    # 使用归一化后的 rewards 计算 R_t = r_t + gamma * R_{t+1}
+            norm_f1 = norm_f1 / (f1_std_map + epsilon)
+        normalized_rewards = torch.where(f1_mask, norm_f1, normalized_rewards)
+        
+        # InfoGain 部分
+        ig_mean, ig_std = compute_group_stats(ig_mask)
+        ig_mean_map = ig_mean[group_ids_expanded]
+        ig_std_map = ig_std[group_ids_expanded]
+        
+        norm_ig = (token_level_rewards - ig_mean_map)
+        if norm_adv_by_std_in_grpo:
+            norm_ig = norm_ig / (ig_std_map + epsilon)
+        normalized_rewards = torch.where(ig_mask, norm_ig, normalized_rewards)
     
-    discounted_returns = torch.zeros_like(normalized_rewards)
-    next_return = torch.zeros(bsz, device=device)
-    
-    for t in reversed(range(seq_len)):
-        current_reward = normalized_rewards[:, t]
-        current_mask = response_mask[:, t]
-        current_return = current_reward + gamma * next_return
-        discounted_returns[:, t] = current_return
-        next_return = current_return * current_mask
+    else:  # joint
+        joint_mask = f1_mask | ig_mask
+        g_mean, g_std = compute_group_stats(joint_mask)
+        mean_map = g_mean[group_ids_expanded]
+        std_map = g_std[group_ids_expanded]
+        
+        norm_val = (token_level_rewards - mean_map)
+        if norm_adv_by_std_in_grpo:
+            norm_val = norm_val / (std_map + epsilon)
+        normalized_rewards = torch.where(joint_mask, norm_val, normalized_rewards)
 
-    # ========== Step 3: 应用掩码 ==========
-    advantages = discounted_returns * response_mask
-    final_returns = discounted_returns * response_mask
+    # ========== Step 5: 折扣累积回报 ==========
+    if gamma == 1.0:
+        # gamma=1.0 时使用高效的 cumsum
+        discounted_returns = torch.flip(
+            torch.cumsum(torch.flip(normalized_rewards * response_mask, [1]), dim=1), 
+            [1]
+        ) * response_mask
+    else:
+        # gamma != 1.0 需要循环，但是张量级操作，O(SeqLen) 而非 O(BSZ*SeqLen)
+        discounted_returns = torch.zeros_like(normalized_rewards)
+        next_return = torch.zeros(bsz, device=device)
+        for t in reversed(range(seq_len)):
+            current_return = normalized_rewards[:, t] + gamma * next_return
+            discounted_returns[:, t] = current_return
+            next_return = current_return * response_mask[:, t]
+        discounted_returns = discounted_returns * response_mask
 
-    return advantages, final_returns
+    return discounted_returns, discounted_returns
 
 
 

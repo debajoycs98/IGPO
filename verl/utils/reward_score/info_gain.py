@@ -277,10 +277,11 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         
         # 分配奖励
         if i < chats_size - 1:
-            # 非最后一轮，使用 info_gain_reward
-            scores[last_token_idx] = info_gain_reward[i]
+            ig_value = info_gain_reward[i]
+            if ig_value == 0.0:
+                ig_value = 1e-10  # 避免被 !=0 检查跳过
+            scores[last_token_idx] = ig_value
         else:
-            # 最后一轮，使用 f1_score
             scores[last_token_idx] = alpha * f1_score
     
     if is_validation:
