@@ -118,6 +118,8 @@ def compute_grpo_outcome_advantage(
     norm_adv_by_std_in_grpo: bool = True,
     gamma: float = 1.0,
     info_gain_norm_mode: str = "joint",
+    curriculum_f1_weight: float = 1.0,
+    curriculum_ig_weight: float = 1.0,
 ):
     """
     为 GRPO 计算优势函数 (Advantage)，使用向量化实现提升性能。
@@ -130,6 +132,8 @@ def compute_grpo_outcome_advantage(
         norm_adv_by_std_in_grpo: 是否除以标准差
         gamma: 折扣因子，默认 1.0
         info_gain_norm_mode: "joint" 或 "separate"
+        curriculum_f1_weight: F1 奖励的 Curriculum 权重，默认 1.0
+        curriculum_ig_weight: InfoGain 奖励的 Curriculum 权重，默认 1.0
 
     Returns:
         advantages, returns: 均为 (bs, response_length)
@@ -145,6 +149,13 @@ def compute_grpo_outcome_advantage(
         position_indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(bsz, -1)
         f1_mask = (position_indices == last_valid_pos.unsqueeze(1)) & (response_mask == 1)
         ig_mask = (response_mask == 1) & (~f1_mask) & (token_level_rewards != 0)
+    
+    # ========== Step 1.5: 应用 Curriculum 权重 ==========
+    if curriculum_f1_weight != 1.0 or curriculum_ig_weight != 1.0:
+        weighted_rewards = token_level_rewards.clone()
+        weighted_rewards = torch.where(f1_mask, token_level_rewards * curriculum_f1_weight, weighted_rewards)
+        weighted_rewards = torch.where(ig_mask, token_level_rewards * curriculum_ig_weight, weighted_rewards)
+        token_level_rewards = weighted_rewards
 
     # ========== Step 2: 构建 Group 映射（向量化） ==========
     # 将 index 转换为连续的 group_id (0, 1, 2, ...)

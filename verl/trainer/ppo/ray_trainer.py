@@ -186,7 +186,7 @@ def compute_response_mask(data: DataProto):
     return attention_mask[:, -response_length:]
 
 
-def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, info_gain_norm_mode="joint"):
+def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_repeat=1, multi_turn=False, norm_adv_by_std_in_grpo=True, info_gain_norm_mode="joint", curriculum_f1_weight=1.0, curriculum_ig_weight=1.0):
     # Back-compatible with trainers that do not compute response mask in fit
     if "response_mask" not in data.batch:
         data.batch["response_mask"] = compute_response_mask(data)
@@ -219,6 +219,8 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
             gamma=gamma,
             info_gain_norm_mode=info_gain_norm_mode,
+            curriculum_f1_weight=curriculum_f1_weight,
+            curriculum_ig_weight=curriculum_ig_weight,
         )
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
@@ -1320,6 +1322,27 @@ class RayPPOTrainer:
                         norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)  # GRPO adv normalization factor
                         info_gain_norm_mode = getattr(self.config.algorithm, 'info_gain_norm_mode', 'joint')  # "joint" 或 "separate"
 
+                        # Curriculum Learning: 动态调整 F1 和 IG 权重
+                        use_curriculum = getattr(self.config.algorithm, 'use_curriculum', False)
+                        if use_curriculum:
+                            total_steps = self.config.trainer.total_epochs * len(self.train_dataloader)
+                            progress = min(self.global_steps / max(total_steps, 1), 1.0)
+                            # 读取 curriculum 配置
+                            f1_init = getattr(self.config.algorithm, 'curriculum_f1_init', 0.5)
+                            f1_final = getattr(self.config.algorithm, 'curriculum_f1_final', 1.0)
+                            ig_init = getattr(self.config.algorithm, 'curriculum_ig_init', 1.0)
+                            ig_final = getattr(self.config.algorithm, 'curriculum_ig_final', 0.5)
+                            # 线性插值
+                            curriculum_f1_weight = f1_init + (f1_final - f1_init) * progress
+                            curriculum_ig_weight = ig_init + (ig_final - ig_init) * progress
+                            # 记录到 metrics
+                            metrics["curriculum/f1_weight"] = curriculum_f1_weight
+                            metrics["curriculum/ig_weight"] = curriculum_ig_weight
+                            metrics["curriculum/progress"] = progress
+                        else:
+                            curriculum_f1_weight = 1.0
+                            curriculum_ig_weight = 1.0
+
                         batch = compute_advantage(
                             batch,
                             adv_estimator=self.config.algorithm.adv_estimator,
@@ -1329,6 +1352,8 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
                             info_gain_norm_mode=info_gain_norm_mode,
+                            curriculum_f1_weight=curriculum_f1_weight,
+                            curriculum_ig_weight=curriculum_ig_weight,
                         )
                         # with open("/ossfs/workspace/linyang/FactAgent/DeepResearcher/adv.json", 'a') as f:
                         #     json.dump(batch.batch['advantages'].detach().cpu().tolist(), f, allow_nan=True)
