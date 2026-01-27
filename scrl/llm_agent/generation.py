@@ -18,6 +18,14 @@ from typing import List, Dict, Tuple, Optional
 DEBUG_SHAPES = os.environ.get('IGPO_DEBUG_SHAPES', '').lower() in ('true', '1', 'yes')
 if DEBUG_SHAPES:
     print("[IGPO] Debug mode enabled: tensor shape printing is ON (IGPO_DEBUG_SHAPES=true)")
+
+# Import vectorized GT logprob module
+from scrl.llm_agent.vectorized_gt_logprob import (
+    is_vectorized_enabled,
+    VectorizedGTConfig,
+    VectorizedGTLogProbComputer,
+)
+import math
 from dataclasses import dataclass
 from tensordict import TensorDict
 from scrl.llm_agent.tensor_helper import TensorHelper, TensorConfig
@@ -376,6 +384,10 @@ class LLMGenerationManager:
         info_gain_rewards = [[] for _ in range(len(messages_list))]
         gt_values = {}  # 存储上一轮的值（概率或log概率，取决于 info_gain_type）
 
+        # 向量化开关检测
+        use_vectorized_gt_logprob = is_vectorized_enabled()
+        # 记录每个样本每个 turn 结束时的 token 位置（用于向量化计算）
+        turn_end_positions_per_sample = [[] for _ in range(len(messages_list))] if use_vectorized_gt_logprob else None
 
         for step in range(self.config.max_turns):
             print(f"node {node_rank} step {step} start!")
@@ -491,6 +503,14 @@ class LLMGenerationManager:
             #                    "prob_of_gt": [math.exp(x[i][j]) for j in range(gt_idx[i][0], gt_idx[i][1])]}, f)
             #         f.write('\n')
             
+            
+            # ========== 记录 turn 结束位置（用于向量化计算） ==========
+            if use_vectorized_gt_logprob and turn_end_positions_per_sample is not None:
+                # 记录每个活跃样本当前 turn 的 context 结束位置
+                for idx, i in enumerate(activate_list):
+                    # 从 attention_mask 计算当前样本的有效 token 数
+                    valid_len = rollings_active.batch['attention_mask'][idx].sum().item()
+                    turn_end_positions_per_sample[i].append(int(valid_len))
             
             # ========== 根据 info_gain_type 计算 info_gain_reward ==========
             # "prob_diff": 使用概率差 exp(mean(log P_t)) - exp(mean(log P_{t-1}))
@@ -613,6 +633,19 @@ class LLMGenerationManager:
         # with open(gt_log_probs_path, 'w') as f:
         #     json.dump({"gt_log_probs_per_turn": gt_log_probs_per_turn, "gt_entropys_per_turn": gt_entropys_per_turn}, f)
         
+        # ========== 向量化 GT LogProb 状态报告 ==========
+        if use_vectorized_gt_logprob and turn_end_positions_per_sample is not None:
+            # 统计 turn 位置信息
+            total_turns = sum(len(pos) for pos in turn_end_positions_per_sample)
+            samples_with_turns = sum(1 for pos in turn_end_positions_per_sample if len(pos) > 0)
+            
+            print(f"[IGPO] Vectorized GT LogProb ENABLED: "
+                  f"{samples_with_turns}/{len(messages_list)} samples, "
+                  f"{total_turns} total turns recorded")
+            
+            # 打印 info_gain 统计
+            total_info_gains = sum(len(r) for r in info_gain_rewards)
+            print(f"[IGPO] Info gain rewards computed: {total_info_gains} values")
 
         if activate_list != []:
             for i in activate_list:

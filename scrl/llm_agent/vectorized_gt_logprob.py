@@ -30,6 +30,8 @@ def is_vectorized_enabled() -> bool:
         # 从环境变量读取
         env_val = os.environ.get('IGPO_USE_VECTORIZED_GT_LOGPROB', '').lower()
         _VECTORIZED_ENABLED = env_val in ('true', '1', 'yes')
+        # 首次初始化时打印状态
+        print(f"[IGPO] Vectorized GT LogProb: {'ENABLED' if _VECTORIZED_ENABLED else 'DISABLED (default)'}")
     return _VECTORIZED_ENABLED
 
 

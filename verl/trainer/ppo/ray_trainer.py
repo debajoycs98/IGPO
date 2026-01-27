@@ -1075,6 +1075,10 @@ class RayPPOTrainer:
         from omegaconf import OmegaConf
 
         from verl.utils.tracking import Tracking
+        
+        # Initialize vectorized GT logprob switch from Hydra config
+        from scrl.llm_agent.vectorized_gt_logprob import init_from_config as init_vectorized_config
+        init_vectorized_config(self.config)
 
         logger = Tracking(
             project_name=self.config.trainer.project_name,
