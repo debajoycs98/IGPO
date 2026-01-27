@@ -102,10 +102,16 @@ class NaiveRewardManager:
                 already_print_data_sources[data_source] += 1
                 print("[prompt]", prompt_str)
                 print("[response]", response_str)
-                print("[data_source]",data_source,"[ground_truth]", ground_truth)
+                print("[data_source]", data_source, "[ground_truth]", ground_truth)
                 if isinstance(score, dict):
                     for key, value in score.items():
-                        print(f"[{key}]", value)
+                        if key != 'scores':  # 跳过冗长的 token-level scores
+                            print(f"[{key}]", value)
+                    # 打印 turn 数和 info_gain_reward
+                    if info_gain_reward:
+                        num_turns = len(info_gain_reward) + 1
+                        print(f"[turns]", num_turns)
+                        print(f"[info_gain_reward]", info_gain_reward)
                 else:
                     print("[score]", score)
 

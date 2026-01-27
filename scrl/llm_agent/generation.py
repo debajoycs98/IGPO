@@ -13,6 +13,11 @@ import re
 import os
 import json
 from typing import List, Dict, Tuple, Optional
+
+# Debug flag for shape printing (set IGPO_DEBUG_SHAPES=true to enable)
+DEBUG_SHAPES = os.environ.get('IGPO_DEBUG_SHAPES', '').lower() in ('true', '1', 'yes')
+if DEBUG_SHAPES:
+    print("[IGPO] Debug mode enabled: tensor shape printing is ON (IGPO_DEBUG_SHAPES=true)")
 from dataclasses import dataclass
 from tensordict import TensorDict
 from scrl.llm_agent.tensor_helper import TensorHelper, TensorConfig
@@ -369,6 +374,7 @@ class LLMGenerationManager:
         gt_log_probs_per_turn = [[] for _ in range(len(messages_list))]
         gt_entropys_per_turn = [[] for _ in range(len(messages_list))]
         info_gain_rewards = [[] for _ in range(len(messages_list))]
+        gt_values = {}  # 存储上一轮的值（概率或log概率，取决于 info_gain_type）
 
 
         for step in range(self.config.max_turns):
@@ -379,11 +385,19 @@ class LLMGenerationManager:
                 break
             try:
                 rollings_active = self.tokenizer.apply_chat_template(activate_messages_list, add_generation_prompt=True, tokenize=False)
-            except:
-                json.dump(activate_messages_list,open('./debug.json','w'))
-                for e in activate_messages_list:
-                    print(e)
-                    rollings_active = self.tokenizer.apply_chat_template([e], add_generation_prompt=True, tokenize=False)
+            except Exception as e:
+                print(f"Error in tokenizer.apply_chat_template: {e}")
+                json.dump(activate_messages_list, open('./debug.json', 'w'))
+                # 回退策略：逐个处理每条消息
+                rollings_active = []
+                for msg in activate_messages_list:
+                    try:
+                        result = self.tokenizer.apply_chat_template([msg], add_generation_prompt=True, tokenize=False)
+                        rollings_active.extend(result)
+                    except Exception as inner_e:
+                        print(f"Failed to process message: {inner_e}")
+                        print(f"Message content: {msg}")
+                        raise  # 无法恢复，抛出异常
     
             think = True
             
@@ -447,22 +461,20 @@ class LLMGenerationManager:
             
             pseudo_gen_output = self.pseudo_generate_sequences(info_gain_rollings_active, pseudo_resps_with_gt)
 
-            # with open("/ossfs/workspace/linyang/FactAgent/DeepResearcher/gt_idx2.json", 'a') as f:
-            #     for i in range(len(gt_idx)):
-            #         json.dump({'gt_idx': [pseudo_gen_output.batch['responses'].tolist()[i][j] for j in range(gt_idx[i][0], gt_idx[i][1])], "gt": self.tokenizer(ground_truths_rolling[i]['ground_truth'], return_tensors='pt')['input_ids'].tolist()[0]}, f)
-            # print("responses:", pseudo_gen_output.batch['responses'])
-            print("rollings_active input_ids shape:", rollings_active.batch['input_ids'].shape)
-            print("rollings_active attention_mask shape:", rollings_active.batch['attention_mask'].shape)
-            print("rollings_active position_ids shape:", rollings_active.batch['position_ids'].shape)
-            print("pseudo_gen_output prompts shape:", pseudo_gen_output.batch['prompts'].shape)
-            print("info_gain_rollings_active input_ids shape:", info_gain_rollings_active.batch['input_ids'].shape)
-            print("info_gain_rollings_active attention_mask shape:", info_gain_rollings_active.batch['attention_mask'].shape)
-            print("info_gain_rollings_active position_ids shape:", info_gain_rollings_active.batch['position_ids'].shape)
-            print("pseudo_gen_output prompts shape:", pseudo_gen_output.batch['prompts'].shape)
-            print("pseudo_gen_output attention_mask shape:", pseudo_gen_output.batch['attention_mask'].shape)
-            print("pseudo_gen_output position_ids shape:", pseudo_gen_output.batch['position_ids'].shape)
-            print("pseudo_gen_output responses shape:", pseudo_gen_output.batch['responses'].shape)
-            print("pseudo_gen_output input_ids shape:", pseudo_gen_output.batch['input_ids'].shape)
+            # Debug shape printing (enable with IGPO_DEBUG_SHAPES=true)
+            if DEBUG_SHAPES:
+                print("rollings_active input_ids shape:", rollings_active.batch['input_ids'].shape)
+                print("rollings_active attention_mask shape:", rollings_active.batch['attention_mask'].shape)
+                print("rollings_active position_ids shape:", rollings_active.batch['position_ids'].shape)
+                print("pseudo_gen_output prompts shape:", pseudo_gen_output.batch['prompts'].shape)
+                print("info_gain_rollings_active input_ids shape:", info_gain_rollings_active.batch['input_ids'].shape)
+                print("info_gain_rollings_active attention_mask shape:", info_gain_rollings_active.batch['attention_mask'].shape)
+                print("info_gain_rollings_active position_ids shape:", info_gain_rollings_active.batch['position_ids'].shape)
+                print("pseudo_gen_output prompts shape:", pseudo_gen_output.batch['prompts'].shape)
+                print("pseudo_gen_output attention_mask shape:", pseudo_gen_output.batch['attention_mask'].shape)
+                print("pseudo_gen_output position_ids shape:", pseudo_gen_output.batch['position_ids'].shape)
+                print("pseudo_gen_output responses shape:", pseudo_gen_output.batch['responses'].shape)
+                print("pseudo_gen_output input_ids shape:", pseudo_gen_output.batch['input_ids'].shape)
             
             pseudo_gen_output_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
 
@@ -487,7 +499,6 @@ class LLMGenerationManager:
             info_gain_type = self.config.info_gain_type  # "prob_diff" 或 "log_prob_diff"
             
             if step == 0:
-                gt_values = {}  # 存储上一轮的值（概率或log概率，取决于 info_gain_type）
                 for i in activate_list:
                     log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
                     mean_log_prob = log_probs.mean().item()

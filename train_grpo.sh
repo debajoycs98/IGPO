@@ -13,7 +13,10 @@ export EVAL_LOG_PATH='eval_log'
 mkdir -p $OUTPUT
 mkdir -p $EVAL_LOG_PATH
 
-    
+# ==== Debug Options ====
+# export IGPO_DEBUG_SHAPES=true    # 启用 tensor shape 调试打印
+# =======================
+
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     data.train_files=./data/train.parquet \
     data.val_files=./data/test.parquet \
@@ -47,6 +50,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     algorithm.gamma=1.0 \
     +algorithm.info_gain_type=prob_diff \
     +algorithm.info_gain_norm_mode=joint \
+    +algorithm.use_vectorized_gt_logprob=false \
     +algorithm.use_curriculum=false \
     +algorithm.curriculum_f1_init=0.5 \
     +algorithm.curriculum_f1_final=1.0 \
