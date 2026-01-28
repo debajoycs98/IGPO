@@ -243,4 +243,4 @@ do_search: true
 codeact_env_disabled: true
 agent_grpo:
   n: 16
-search_engine: rag
+search_engine: online_search

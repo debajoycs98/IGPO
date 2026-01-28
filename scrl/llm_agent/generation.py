@@ -47,7 +47,7 @@ class GenerationConfig:
     n: int = 1
     project_name: str = None
     experiment_name: str = None
-    search_engine: str = "rag"
+    search_engine: str = "online_search"
     nnodes: int = 1
     oss_access_key_id: str = ''
     oss_access_key_secret: str = ''

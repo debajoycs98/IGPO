@@ -76,7 +76,7 @@ eval:
   
   # Multi-turn settings
   max_turns: 10
-  search_engine: rag  # "rag" or "online_search"
+  search_engine: online_search  # "online_search" or "rag" (offline)
   
   # Tool settings
   codeact_env_disabled: true

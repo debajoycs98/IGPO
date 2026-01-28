@@ -22,7 +22,7 @@ MODEL_PATH=${MODEL_PATH:-"/root/Qwen2.5-7B-Instruct"}
 VAL_FILES=${VAL_FILES:-"./data/test.parquet"}
 OUTPUT_DIR=${OUTPUT_DIR:-"./eval_results"}
 MAX_TURNS=${MAX_TURNS:-10}
-SEARCH_ENGINE=${SEARCH_ENGINE:-"rag"}  # "rag" or "online_search"
+SEARCH_ENGINE=${SEARCH_ENGINE:-"online_search"}  # "online_search" or "rag" (offline)
 N_GPUS=${N_GPUS:-8}
 BATCH_SIZE=${BATCH_SIZE:-32}
 
