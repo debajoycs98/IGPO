@@ -489,19 +489,6 @@ class LLMGenerationManager:
                 print("pseudo_gen_output input_ids shape:", pseudo_gen_output.batch['input_ids'].shape)
             
             pseudo_gen_output_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
-
-            
-
-
-            # with open("/ossfs/workspace/linyang/FactAgent/DeepResearcher/pseudo_gen_log_prob.json", 'w') as f:
-            #     json.dump({"type": str(type(pseudo_gen_output_log_prob)), "pseudo_gen_output_log_prob": str(pseudo_gen_output_log_prob)}, f)
-            # x = pseudo_gen_output_log_prob.batch['old_log_probs'].tolist()
-            # import math
-            # with open("/ossfs/workspace/linyang/FactAgent/DeepResearcher/pseudo_gen_log_prob_and_prob.jsonl", 'a') as f:
-            #     for i in range(len(x)):
-            #         json.dump({"log_prob_of_gt": [x[i][j] for j in range(gt_idx[i][0], gt_idx[i][1])],  
-            #                    "prob_of_gt": [math.exp(x[i][j]) for j in range(gt_idx[i][0], gt_idx[i][1])]}, f)
-            #         f.write('\n')
             
             
             # ========== 记录 turn 结束位置（用于向量化计算） ==========
@@ -623,10 +610,7 @@ class LLMGenerationManager:
                         )
             print(f"第{step}轮结束， node {node_rank} 原本有{len(activate_list)}个query，现在有{len(activate_list_copy)}个query")
             activate_list = activate_list_copy
-            # with open(f"/ossfs/workspace/linyang/FactAgent/DeepResearcher/messages_list_{step}.jsonl", 'a') as f:
-            #     for message in messages_list:
-            #         json.dump(message, f)
-            #         f.write('\n')
+           
         
         # 保存 gt_log_probs 到本地输出目录（如果需要调试，可取消注释）
         # gt_log_probs_path = os.path.join(output_dir, f"gt_log_probs_{global_steps}.json")
@@ -685,12 +669,7 @@ class LLMGenerationManager:
         message_tensor.non_tensor_batch['agent_grpo_idx'] = np.array(agent_grpo_idx, dtype=object)
         print("generation结束")
 
-
-        # import math
         print(f"node {node_rank} message_string_list {len(message_string_list)}")
-        # for info_gain_reward in info_gain_rewards:
-        #     for r in info_gain_reward:
-        #         if math.isnan(r):
-        #             raise ValueError("Find nan in info_gain_rewards!")
+
         return message_string_list, message_tensor, info_gain_rewards
     

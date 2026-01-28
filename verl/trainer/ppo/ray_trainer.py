@@ -832,14 +832,6 @@ class RayPPOTrainer:
             if key_noformatf1 not in data_source_reward:
                 data_source_reward[key_noformatf1] = []
             data_source_reward[key_noformatf1].append(noformatf1_scores[i])
-			
-        # for i in range(len(data_sources)):
-        #     data_source = data_sources[i]
-        #     for vt in val_types:
-        #         key = f"{data_source}_{vt}"
-        #         if key not in data_source_reward:
-        #             data_source_reward[key] = []
-        #         data_source_reward[key].append(reward_tensor_cat[vt][i].item())
 		
 
         metric_dict = {}
@@ -861,7 +853,6 @@ class RayPPOTrainer:
 				noformatf1_scores=noformatf1_scores,
                 ground_truths = ground_truths
             )
-            # json.dump(metric_dict,open(f'{val_data_dir}/metric_step_{self.global_steps}.json','w'))
             
         return metric_dict
 
@@ -1359,8 +1350,7 @@ class RayPPOTrainer:
                             curriculum_f1_weight=curriculum_f1_weight,
                             curriculum_ig_weight=curriculum_ig_weight,
                         )
-                        # with open("/ossfs/workspace/linyang/FactAgent/DeepResearcher/adv.json", 'a') as f:
-                        #     json.dump(batch.batch['advantages'].detach().cpu().tolist(), f, allow_nan=True)
+
 
                     # update critic
                     if self.use_critic:
