@@ -372,11 +372,13 @@ class LLMGenerationManager:
         activate_list = [i for i in range(len(messages_list))]
         message_string_list = ["" for _ in range(len(messages_list))]
 
-        # 确保保存目录存在
-        output_dir = f"./outputs/{self.config.project_name}/{self.config.experiment_name}/rollout"
-        if not os.path.exists(output_dir):
-            print(f"Directory not exist, create at {output_dir}")
-            os.makedirs(output_dir, exist_ok=True)
+        # 确保保存目录存在（仅在 project_name 和 experiment_name 有效时创建）
+        output_dir = None
+        if self.config.project_name and self.config.experiment_name:
+            output_dir = f"./outputs/{self.config.project_name}/{self.config.experiment_name}/rollout"
+            if not os.path.exists(output_dir):
+                print(f"Directory not exist, create at {output_dir}")
+                os.makedirs(output_dir, exist_ok=True)
         
         # 创建information gain reward：list[list]
         gt_log_probs_per_turn = [[] for _ in range(len(messages_list))]
@@ -386,8 +388,18 @@ class LLMGenerationManager:
 
         # 向量化开关检测
         use_vectorized_gt_logprob = is_vectorized_enabled()
-        # 记录每个样本每个 turn 结束时的 token 位置（用于向量化计算）
-        turn_end_positions_per_sample = [[] for _ in range(len(messages_list))] if use_vectorized_gt_logprob else None
+        
+        # ========== 向量化计算：数据收集结构 ==========
+        # 当启用向量化时，延迟计算 GT log probs，在 loop 结束后批量处理
+        vectorized_data_collector = None
+        if use_vectorized_gt_logprob:
+            vectorized_data_collector = {
+                'pseudo_outputs_per_turn': [],  # 每个 turn 的 pseudo_gen_output 列表
+                'activate_lists_per_turn': [],  # 每个 turn 的 activate_list
+                'gt_idx': gt_idx,  # GT token 范围
+                'num_samples': len(messages_list),
+            }
+            print(f"[IGPO] Vectorized GT LogProb: Collecting data for batch computation...")
 
         for step in range(self.config.max_turns):
             print(f"node {node_rank} step {step} start!")
@@ -445,7 +457,7 @@ class LLMGenerationManager:
                         mode='constant',
                         value=self.tokenizer.pad_token_id,
                        )
-					
+
                     info_gain_rollings_active.batch['attention_mask'] = F.pad(
                         info_gain_rollings_active.batch['attention_mask'], 
                         pad=(0, rollings_active.batch['attention_mask'].shape[1] - info_gain_rollings_active.batch['attention_mask'].shape[1]),
@@ -488,56 +500,62 @@ class LLMGenerationManager:
                 print("pseudo_gen_output responses shape:", pseudo_gen_output.batch['responses'].shape)
                 print("pseudo_gen_output input_ids shape:", pseudo_gen_output.batch['input_ids'].shape)
             
-            pseudo_gen_output_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
-            
-            
-            # ========== 记录 turn 结束位置（用于向量化计算） ==========
-            if use_vectorized_gt_logprob and turn_end_positions_per_sample is not None:
-                # 记录每个活跃样本当前 turn 的 context 结束位置
-                for idx, i in enumerate(activate_list):
-                    # 从 attention_mask 计算当前样本的有效 token 数
-                    valid_len = rollings_active.batch['attention_mask'][idx].sum().item()
-                    turn_end_positions_per_sample[i].append(int(valid_len))
-            
-            # ========== 根据 info_gain_type 计算 info_gain_reward ==========
-            # "prob_diff": 使用概率差 exp(mean(log P_t)) - exp(mean(log P_{t-1}))
-            # "log_prob_diff": 使用 log 概率差 mean(log P_t) - mean(log P_{t-1})
-            
-            info_gain_type = self.config.info_gain_type  # "prob_diff" 或 "log_prob_diff"
-            
-            if step == 0:
-                for i in activate_list:
-                    log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
-                    mean_log_prob = log_probs.mean().item()
-                    
-                    if info_gain_type == "log_prob_diff":
-                        # 存储 log 概率的均值
-                        gt_values[i] = mean_log_prob
-                    else:  # "prob_diff" (默认)
-                        # 存储概率的几何平均（即 exp(mean(log P))）
-                        gt_values[i] = torch.exp(torch.tensor(mean_log_prob)).item()
-                    
-                    gt_log_probs_per_turn[i].append(log_probs.tolist())
-                    gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())
+            # ========== GT LogProb 计算（向量化或即时） ==========
+            if use_vectorized_gt_logprob and vectorized_data_collector is not None:
+                # 向量化模式：收集数据，延迟计算
+                # 保存当前 turn 的 pseudo_gen_output（需要 clone 以避免被后续修改）
+                pseudo_output_clone = DataProto.from_dict({
+                    'prompts': pseudo_gen_output.batch['prompts'].clone(),
+                    'responses': pseudo_gen_output.batch['responses'].clone(),
+                    'input_ids': pseudo_gen_output.batch['input_ids'].clone(),
+                    'attention_mask': pseudo_gen_output.batch['attention_mask'].clone(),
+                    'position_ids': pseudo_gen_output.batch['position_ids'].clone(),
+                })
+                vectorized_data_collector['pseudo_outputs_per_turn'].append(pseudo_output_clone)
+                vectorized_data_collector['activate_lists_per_turn'].append(list(activate_list))
             else:
-                for i in activate_list:
-                    log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
-                    mean_log_prob = log_probs.mean().item()
-                    
-                    if info_gain_type == "log_prob_diff":
-                        # 使用 log 概率差
-                        cur_value = mean_log_prob
-                        info_gain = cur_value - gt_values[i]
-                    else:  # "prob_diff" (默认)
-                        # 使用概率差
-                        cur_value = torch.exp(torch.tensor(mean_log_prob)).item()
-                        info_gain = cur_value - gt_values[i]
-                    
-                    info_gain_rewards[i].append(info_gain)
-                    gt_values[i] = cur_value
-                    
-                    gt_log_probs_per_turn[i].append(log_probs.tolist())
-                    gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())       
+                # 原始模式：即时计算
+                pseudo_gen_output_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
+                
+                # ========== 根据 info_gain_type 计算 info_gain_reward ==========
+                # "prob_diff": 使用概率差 exp(mean(log P_t)) - exp(mean(log P_{t-1}))
+                # "log_prob_diff": 使用 log 概率差 mean(log P_t) - mean(log P_{t-1})
+                
+                info_gain_type = self.config.info_gain_type  # "prob_diff" 或 "log_prob_diff"
+                
+                if step == 0:
+                    for i in activate_list:
+                        log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
+                        mean_log_prob = log_probs.mean().item()
+                        
+                        if info_gain_type == "log_prob_diff":
+                            # 存储 log 概率的均值
+                            gt_values[i] = mean_log_prob
+                        else:  # "prob_diff" (默认)
+                            # 存储概率的几何平均（即 exp(mean(log P))）
+                            gt_values[i] = torch.exp(torch.tensor(mean_log_prob)).item()
+                        
+                        gt_log_probs_per_turn[i].append(log_probs.tolist())
+                        gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())
+                else:
+                    for i in activate_list:
+                        log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
+                        mean_log_prob = log_probs.mean().item()
+                        
+                        if info_gain_type == "log_prob_diff":
+                            # 使用 log 概率差
+                            cur_value = mean_log_prob
+                            info_gain = cur_value - gt_values[i]
+                        else:  # "prob_diff" (默认)
+                            # 使用概率差
+                            cur_value = torch.exp(torch.tensor(mean_log_prob)).item()
+                            info_gain = cur_value - gt_values[i]
+                        
+                        info_gain_rewards[i].append(info_gain)
+                        gt_values[i] = cur_value
+                        
+                        gt_log_probs_per_turn[i].append(log_probs.tolist())
+                        gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())       
 
             gen_output = self._generate_with_gpu_padding(rollings_active)
             
@@ -612,24 +630,153 @@ class LLMGenerationManager:
             activate_list = activate_list_copy
            
         
+        # ========== 向量化 GT LogProb 批量计算 ==========
+        if use_vectorized_gt_logprob and vectorized_data_collector is not None:
+            num_turns_collected = len(vectorized_data_collector['pseudo_outputs_per_turn'])
+            if num_turns_collected > 0:
+                print(f"[IGPO] Vectorized GT LogProb: Processing {num_turns_collected} turns in batch...")
+                
+                # 批量计算所有 turns 的 GT log probs
+                info_gain_type = self.config.info_gain_type
+                all_log_probs_results = []
+                
+                # 方案：将所有 turns 的数据合并成一个大 batch，一次性调用 compute_log_prob
+                # 注意：每个 turn 的 batch_size 可能不同（因为活跃样本数不同）
+                # 为了简化，我们按 turn 顺序处理，但只调用一次 compute_log_prob（合并所有数据）
+                
+                # 收集所有 pseudo_outputs，找到最大序列长度
+                all_input_ids = []
+                all_attention_mask = []
+                all_position_ids = []
+                all_prompts = []
+                all_responses = []
+                turn_boundaries = [0]  # 每个 turn 在合并 batch 中的起始位置
+                
+                for turn_idx, pseudo_output in enumerate(vectorized_data_collector['pseudo_outputs_per_turn']):
+                    batch_size = pseudo_output.batch['input_ids'].shape[0]
+                    all_input_ids.append(pseudo_output.batch['input_ids'])
+                    all_attention_mask.append(pseudo_output.batch['attention_mask'])
+                    all_position_ids.append(pseudo_output.batch['position_ids'])
+                    all_prompts.append(pseudo_output.batch['prompts'])
+                    all_responses.append(pseudo_output.batch['responses'])
+                    turn_boundaries.append(turn_boundaries[-1] + batch_size)
+                
+                # 找到最大长度并 pad
+                max_seq_len = max(t.shape[1] for t in all_input_ids)
+                max_prompt_len = max(t.shape[1] for t in all_prompts)
+                max_response_len = max(t.shape[1] for t in all_responses)
+                
+                padded_input_ids = []
+                padded_attention_mask = []
+                padded_position_ids = []
+                padded_prompts = []
+                padded_responses = []
+                
+                for i in range(len(all_input_ids)):
+                    # Pad input_ids
+                    pad_len = max_seq_len - all_input_ids[i].shape[1]
+                    if pad_len > 0:
+                        padded_input_ids.append(F.pad(all_input_ids[i], (0, pad_len), value=self.tokenizer.pad_token_id))
+                        padded_attention_mask.append(F.pad(all_attention_mask[i], (0, pad_len), value=0))
+                        padded_position_ids.append(F.pad(all_position_ids[i], (0, pad_len), value=0))
+                    else:
+                        padded_input_ids.append(all_input_ids[i])
+                        padded_attention_mask.append(all_attention_mask[i])
+                        padded_position_ids.append(all_position_ids[i])
+                    
+                    # Pad prompts
+                    prompt_pad_len = max_prompt_len - all_prompts[i].shape[1]
+                    if prompt_pad_len > 0:
+                        padded_prompts.append(F.pad(all_prompts[i], (0, prompt_pad_len), value=self.tokenizer.pad_token_id))
+                    else:
+                        padded_prompts.append(all_prompts[i])
+                    
+                    # Pad responses
+                    response_pad_len = max_response_len - all_responses[i].shape[1]
+                    if response_pad_len > 0:
+                        padded_responses.append(F.pad(all_responses[i], (0, response_pad_len), value=self.tokenizer.pad_token_id))
+                    else:
+                        padded_responses.append(all_responses[i])
+                
+                # 合并成一个大 batch
+                merged_input_ids = torch.cat(padded_input_ids, dim=0)
+                merged_attention_mask = torch.cat(padded_attention_mask, dim=0)
+                merged_position_ids = torch.cat(padded_position_ids, dim=0)
+                merged_prompts = torch.cat(padded_prompts, dim=0)
+                merged_responses = torch.cat(padded_responses, dim=0)
+                
+                merged_batch = DataProto.from_dict({
+                    'prompts': merged_prompts,
+                    'responses': merged_responses,
+                    'input_ids': merged_input_ids,
+                    'attention_mask': merged_attention_mask,
+                    'position_ids': merged_position_ids,
+                })
+                
+                print(f"[IGPO] Vectorized: Merged batch size = {merged_input_ids.shape[0]}, seq_len = {merged_input_ids.shape[1]}")
+                
+                # 一次性调用 compute_log_prob
+                merged_log_probs = self.actor_rollout_wg.compute_log_prob(merged_batch)
+                
+                print(f"[IGPO] Vectorized: compute_log_prob completed")
+                
+                # 从合并结果中提取各个 turn 的结果，并计算 info_gain_rewards
+                gt_idx = vectorized_data_collector['gt_idx']
+                
+                for turn_idx in range(num_turns_collected):
+                    start_idx = turn_boundaries[turn_idx]
+                    end_idx = turn_boundaries[turn_idx + 1]
+                    activate_list_for_turn = vectorized_data_collector['activate_lists_per_turn'][turn_idx]
+                    
+                    # 提取当前 turn 的 log_probs
+                    turn_old_log_probs = merged_log_probs.batch['old_log_probs'][start_idx:end_idx]
+                    turn_entropys = merged_log_probs.batch['entropys'][start_idx:end_idx]
+                    
+                    if turn_idx == 0:
+                        # 第一个 turn：初始化 gt_values
+                        for local_idx, global_idx in enumerate(activate_list_for_turn):
+                            log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
+                            mean_log_prob = log_probs.mean().item()
+                            
+                            if info_gain_type == "log_prob_diff":
+                                gt_values[global_idx] = mean_log_prob
+                            else:  # "prob_diff"
+                                gt_values[global_idx] = torch.exp(torch.tensor(mean_log_prob)).item()
+                            
+                            gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
+                            gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
+                    else:
+                        # 后续 turns：计算 info_gain
+                        for local_idx, global_idx in enumerate(activate_list_for_turn):
+                            log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
+                            mean_log_prob = log_probs.mean().item()
+                            
+                            if info_gain_type == "log_prob_diff":
+                                cur_value = mean_log_prob
+                                info_gain = cur_value - gt_values[global_idx]
+                            else:  # "prob_diff"
+                                cur_value = torch.exp(torch.tensor(mean_log_prob)).item()
+                                info_gain = cur_value - gt_values[global_idx]
+                            
+                            info_gain_rewards[global_idx].append(info_gain)
+                            gt_values[global_idx] = cur_value
+                            
+                            gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
+                            gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
+                
+                # 统计并打印结果
+                total_info_gains = sum(len(r) for r in info_gain_rewards)
+                print(f"[IGPO] Vectorized GT LogProb COMPLETED: "
+                      f"{num_turns_collected} turns, "
+                      f"{merged_input_ids.shape[0]} total samples processed, "
+                      f"{total_info_gains} info_gain values computed")
+            else:
+                print(f"[IGPO] Vectorized GT LogProb: No turns collected (all samples may have finished early)")
+        
         # 保存 gt_log_probs 到本地输出目录（如果需要调试，可取消注释）
         # gt_log_probs_path = os.path.join(output_dir, f"gt_log_probs_{global_steps}.json")
         # with open(gt_log_probs_path, 'w') as f:
         #     json.dump({"gt_log_probs_per_turn": gt_log_probs_per_turn, "gt_entropys_per_turn": gt_entropys_per_turn}, f)
-        
-        # ========== 向量化 GT LogProb 状态报告 ==========
-        if use_vectorized_gt_logprob and turn_end_positions_per_sample is not None:
-            # 统计 turn 位置信息
-            total_turns = sum(len(pos) for pos in turn_end_positions_per_sample)
-            samples_with_turns = sum(1 for pos in turn_end_positions_per_sample if len(pos) > 0)
-            
-            print(f"[IGPO] Vectorized GT LogProb ENABLED: "
-                  f"{samples_with_turns}/{len(messages_list)} samples, "
-                  f"{total_turns} total turns recorded")
-            
-            # 打印 info_gain 统计
-            total_info_gains = sum(len(r) for r in info_gain_rewards)
-            print(f"[IGPO] Info gain rewards computed: {total_info_gains} values")
 
         if activate_list != []:
             for i in activate_list:

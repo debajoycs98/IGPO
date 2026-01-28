@@ -84,7 +84,7 @@ class NaiveRewardManager:
                 val_type=val_type,
                 info_gain_reward=info_gain_reward,
                 tokenizer=self.tokenizer,
-				is_validation=is_validation,
+                is_validation=is_validation,
             )
 
             if is_validation:
@@ -128,13 +128,13 @@ class NaiveRewardManager:
             return {
                 "f1_scores": f1_scores,
                 "em_scores": em_scores,
-				"noformatf1_scores": noformatf1_scores,
-				"reward_tensor": reward_tensor,
+                "noformatf1_scores": noformatf1_scores,
+                "reward_tensor": reward_tensor,
             }
         if return_dict:
             return {
                 "reward_tensor": reward_tensor,
                 "reward_extra_info": reward_extra_info,
-            }	
+            }
         else:
             return reward_tensor

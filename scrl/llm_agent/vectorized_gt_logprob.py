@@ -1,7 +1,16 @@
 """
 IGPO Vectorized Ground Truth Log Probability Computation
 
-将 T 次 Forward Pass 优化为单次 Forward Pass 的向量化实现。
+将 T 次 compute_log_prob 调用优化为单次调用的批量处理实现。
+
+工作原理：
+- 原始方式：在每个 turn 中调用 compute_log_prob，共 T 次调用
+- 向量化方式：收集所有 turns 的数据，在 loop 结束后批量调用一次 compute_log_prob
+
+效率提升：
+- 减少 Ray 远程调用次数（从 T 次到 1 次）
+- 减少数据传输开销
+- 批量 GPU 计算效率更高
 
 启用方式（在 train_grpo.sh 中添加）:
     +algorithm.use_vectorized_gt_logprob=true
