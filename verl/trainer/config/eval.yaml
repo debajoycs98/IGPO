@@ -54,7 +54,11 @@ rollout:
   disable_log_stats: true
   enable_chunked_prefill: true
   do_sample: false
+  # Log prob computation settings
+  log_prob_micro_batch_size: null
   log_prob_micro_batch_size_per_gpu: 2
+  log_prob_use_dynamic_bsz: true
+  log_prob_max_token_len_per_gpu: 8192
 
 # ============================================
 # Actor Settings (minimal for rollout)
