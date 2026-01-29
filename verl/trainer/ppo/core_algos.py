@@ -252,6 +252,44 @@ def compute_grpo_outcome_advantage(
             next_return = current_return * response_mask[:, t]
         discounted_returns = discounted_returns * response_mask
 
+    # ========== DEBUG: 验证 Bug 2 是否存在 ==========
+    # 如果 info_gain reward 被正确分配，discounted_returns 中 response_mask=1 的位置应该有不同的值
+    # 如果全部相等，说明只有 F1 reward 生效，info_gain reward 被丢弃了
+    with torch.no_grad():
+        all_equal_count = 0
+        varied_count = 0
+        single_token_count = 0
+        
+        for sample_idx in range(bsz):
+            mask = response_mask[sample_idx] == 1
+            valid_count = mask.sum().item()
+            
+            if valid_count <= 1:
+                single_token_count += 1
+                continue
+                
+            valid_values = discounted_returns[sample_idx][mask]
+            unique_values = torch.unique(valid_values)
+            
+            if len(unique_values) == 1:
+                all_equal_count += 1
+            else:
+                varied_count += 1
+        
+        total_checked = all_equal_count + varied_count
+        if total_checked > 0:
+            equal_ratio = all_equal_count / total_checked * 100
+            print(f"[Bug2 Check] Total samples: {bsz}, Checked: {total_checked} (skipped {single_token_count} single-token samples)")
+            print(f"[Bug2 Check] ALL_EQUAL: {all_equal_count} ({equal_ratio:.1f}%), VARIED: {varied_count} ({100-equal_ratio:.1f}%)")
+            if equal_ratio > 90:
+                print(f"[Bug2 Check] ⚠️  WARNING: {equal_ratio:.1f}% samples have uniform discounted_returns!")
+                print(f"[Bug2 Check] ⚠️  This strongly suggests info_gain rewards are NOT contributing (Bug 2 exists)!")
+            elif equal_ratio > 50:
+                print(f"[Bug2 Check] ⚠️  CAUTION: {equal_ratio:.1f}% samples have uniform values, possible partial Bug 2.")
+            else:
+                print(f"[Bug2 Check] ✓  Info gain rewards appear to be working normally.")
+    # ========== END DEBUG ==========
+
     return discounted_returns, discounted_returns
 
 
