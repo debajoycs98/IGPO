@@ -261,6 +261,20 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
             return {"f1": f1_score, "em": em_score, "noformatf1": noformatf1_score, "scores": scores}
         return scores
 
+    # ========== DEBUG: 打印第一个样本的详细信息 ==========
+    import os
+    debug_info_gain = os.environ.get("DEBUG_INFO_GAIN", "0") == "1"
+    if debug_info_gain:
+        print(f"\n[info_gain DEBUG] === Sample Analysis ===")
+        print(f"[info_gain DEBUG] solution_str length: {len(solution_str)}")
+        print(f"[info_gain DEBUG] tokens_size: {tokens_size}")
+        print(f"[info_gain DEBUG] chats_size (turns): {chats_size}")
+        print(f"[info_gain DEBUG] info_gain_reward: {info_gain_reward}")
+        print(f"[info_gain DEBUG] separator: {repr(separator)}")
+        print(f"[info_gain DEBUG] sep_positions: {sep_positions[:5]}..." if len(sep_positions) > 5 else f"[info_gain DEBUG] sep_positions: {sep_positions}")
+        print(f"[info_gain DEBUG] turn_start_positions: {turn_start_positions}")
+        print(f"[info_gain DEBUG] turn_end_positions: {turn_end_positions}")
+    
     # 为每个 turn 的最后一个 token 分配奖励
     for i in range(chats_size):
         turn_end_char = turn_end_positions[i]
@@ -274,6 +288,31 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         
         # 确保索引在有效范围内
         last_token_idx = min(last_token_idx, tokens_size - 1)
+        
+        # ========== DEBUG: 打印每个 turn 的详细映射 ==========
+        if debug_info_gain:
+            char_pos = turn_end_char - 1 if turn_end_char > 0 else 0
+            # 获取该位置附近的字符（前后各 20 个字符）
+            context_start = max(0, char_pos - 20)
+            context_end = min(len(solution_str), char_pos + 20)
+            context = solution_str[context_start:context_end]
+            char_at_pos = solution_str[char_pos] if char_pos < len(solution_str) else "EOF"
+            
+            # 获取该 token 的 offset 范围和对应文本
+            if last_token_idx < len(offset_mapping):
+                token_start, token_end = offset_mapping[last_token_idx]
+                token_text = solution_str[token_start:token_end] if token_end <= len(solution_str) else "?"
+            else:
+                token_start, token_end = -1, -1
+                token_text = "?"
+            
+            reward_type = "info_gain" if i < chats_size - 1 else "F1"
+            reward_value = info_gain_reward[i] if i < chats_size - 1 else f1_score
+            
+            print(f"[info_gain DEBUG] Turn {i}: char_pos={char_pos}, char='{repr(char_at_pos)}', token_idx={last_token_idx}")
+            print(f"[info_gain DEBUG]   token offset: ({token_start}, {token_end}), token_text: {repr(token_text)}")
+            print(f"[info_gain DEBUG]   context: ...{repr(context)}...")
+            print(f"[info_gain DEBUG]   reward: {reward_type}={reward_value:.6f}")
         
         # 分配奖励
         if i < chats_size - 1:
