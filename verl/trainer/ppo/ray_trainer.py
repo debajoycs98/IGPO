@@ -153,7 +153,21 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     batch_size = data.batch.batch_size[0]
 
     if multi_turn:
-        loss_mask = data.batch["loss_mask"]
+        # DEBUG: 检查 loss_mask 是否存在
+        if "loss_mask" not in data.batch:
+            print(f"[DEBUG] loss_mask NOT in batch! Using attention_mask instead.")
+            print(f"[DEBUG] Available keys: {list(data.batch.keys())}")
+            loss_mask = data.batch["attention_mask"]
+        else:
+            loss_mask = data.batch["loss_mask"]
+            # DEBUG: 打印 loss_mask 的统计信息（只打印一次）
+            if not hasattr(apply_kl_penalty, '_debug_printed'):
+                apply_kl_penalty._debug_printed = True
+                total_ones = (loss_mask == 1).sum().item()
+                total_zeros = (loss_mask == 0).sum().item()
+                print(f"[DEBUG] loss_mask shape: {loss_mask.shape}")
+                print(f"[DEBUG] loss_mask ones: {total_ones}, zeros: {total_zeros}")
+                print(f"[DEBUG] loss_mask[:3, :20]: {loss_mask[:3, :20]}")
         response_mask = loss_mask[:, -response_length:]
     else:
         attention_mask = data.batch["attention_mask"]
