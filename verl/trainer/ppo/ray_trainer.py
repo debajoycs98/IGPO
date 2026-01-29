@@ -224,7 +224,30 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         if multi_turn:
             # If multi-turn, replace the mask with the relevant part of loss_mask
             response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask
-            grpo_calculation_mask = data.batch["loss_mask"][:, -response_length:]  # This mask is the one intended for GRPO
+            
+            # DEBUG: 检查 loss_mask 是否存在及其值
+            if "loss_mask" not in data.batch:
+                print(f"[DEBUG compute_advantage] loss_mask NOT in batch!")
+                print(f"[DEBUG compute_advantage] Available keys: {list(data.batch.keys())}")
+                # 使用 attention_mask 作为 fallback
+                grpo_calculation_mask = data.batch["attention_mask"][:, -response_length:]
+            else:
+                loss_mask = data.batch["loss_mask"]
+                # DEBUG: 打印 loss_mask 的统计信息（只打印一次）
+                if not hasattr(compute_advantage, '_debug_printed'):
+                    compute_advantage._debug_printed = True
+                    total_ones = (loss_mask == 1).sum().item()
+                    total_zeros = (loss_mask == 0).sum().item()
+                    total_elements = loss_mask.numel()
+                    print(f"[DEBUG compute_advantage] loss_mask shape: {loss_mask.shape}")
+                    print(f"[DEBUG compute_advantage] loss_mask: ones={total_ones} ({total_ones*100/total_elements:.1f}%), zeros={total_zeros} ({total_zeros*100/total_elements:.1f}%)")
+                    # 打印 response 部分的 loss_mask
+                    response_loss_mask = loss_mask[:, -response_length:]
+                    resp_ones = (response_loss_mask == 1).sum().item()
+                    resp_zeros = (response_loss_mask == 0).sum().item()
+                    resp_total = response_loss_mask.numel()
+                    print(f"[DEBUG compute_advantage] response_loss_mask: ones={resp_ones} ({resp_ones*100/resp_total:.1f}%), zeros={resp_zeros} ({resp_zeros*100/resp_total:.1f}%)")
+                grpo_calculation_mask = loss_mask[:, -response_length:]  # This mask is the one intended for GRPO
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
