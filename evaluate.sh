@@ -29,6 +29,10 @@ MAX_TURNS=${MAX_TURNS:-10}
 SEARCH_ENGINE=${SEARCH_ENGINE:-"online_search"}  # "online_search" or "rag"
 N_GPUS=${N_GPUS:-8}
 
+# Tool server communication path (required for online_search mode)
+# Can be OSS path (oss://bucket/path/) or local path (/tmp/igpo_eval/)
+DATA_WRITING_PATH=${DATA_WRITING_PATH:-"oss://your-bucket/igpo_eval/"}
+
 # ============================================
 # Create output directories
 # ============================================
@@ -43,6 +47,7 @@ echo "Validation data: ${VAL_FILES}"
 echo "Output dir: ${OUTPUT_DIR}"
 echo "Max turns: ${MAX_TURNS}"
 echo "Search engine: ${SEARCH_ENGINE}"
+echo "Data writing path: ${DATA_WRITING_PATH}"
 echo "GPUs: ${N_GPUS}"
 echo "============================================"
 
@@ -56,6 +61,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     data.max_prompt_length=30767 \
     data.max_response_length=2000 \
     +data.max_model_len=32768 \
+    +data.data_writing_path=${DATA_WRITING_PATH} \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.use_remove_padding=true \
     actor_rollout_ref.actor.optim.lr=1e-6 \
