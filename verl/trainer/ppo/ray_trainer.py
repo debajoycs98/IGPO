@@ -820,18 +820,19 @@ class RayPPOTrainer:
         data_source_reward = {}
         for i in range(len(data_sources)):
             data_source = data_sources[i]
-            key_f1 = f"{data_source}_f1"
+            # 指标命名：f1 = noformatf1（无格式惩罚），f1_format_penalty = 原f1（有格式惩罚）
+            key_f1 = f"{data_source}_f1"  # 实际使用 noformatf1 的值
+            key_f1_format_penalty = f"{data_source}_f1_format_penalty"  # 实际使用 f1 的值
             key_em = f"{data_source}_em"
-            key_noformatf1 = f"{data_source}_noformatf1"
             if key_f1 not in data_source_reward:
                 data_source_reward[key_f1] = []
-            data_source_reward[key_f1].append(f1_scores[i])
+            data_source_reward[key_f1].append(noformatf1_scores[i])  # f1 使用 noformatf1 的值
+            if key_f1_format_penalty not in data_source_reward:
+                data_source_reward[key_f1_format_penalty] = []
+            data_source_reward[key_f1_format_penalty].append(f1_scores[i])  # f1_format_penalty 使用原 f1 的值
             if key_em not in data_source_reward:
                 data_source_reward[key_em] = []
             data_source_reward[key_em].append(em_scores[i])
-            if key_noformatf1 not in data_source_reward:
-                data_source_reward[key_noformatf1] = []
-            data_source_reward[key_noformatf1].append(noformatf1_scores[i])
 		
 
         metric_dict = {}
