@@ -252,10 +252,76 @@ def compute_grpo_outcome_advantage(
             next_return = current_return * response_mask[:, t]
         discounted_returns = discounted_returns * response_mask
 
-    # ========== DEBUG: 验证 Bug 2 是否存在 ==========
-    # 如果 info_gain reward 被正确分配，discounted_returns 中 response_mask=1 的位置应该有不同的值
-    # 如果全部相等，说明只有 F1 reward 生效，info_gain reward 被丢弃了
+    # ========== DEBUG: 彻底验证 Bug 2 是否存在 ==========
     with torch.no_grad():
+        # === Part 1: 检查 reward 放置位置 ===
+        nonzero_mask = token_level_rewards != 0
+        total_rewards = nonzero_mask.sum().item()
+        
+        rewards_at_valid_pos = (nonzero_mask & (response_mask == 1)).sum().item()
+        rewards_at_invalid_pos = (nonzero_mask & (response_mask == 0)).sum().item()
+        
+        f1_rewards = (nonzero_mask & f1_mask).sum().item()
+        ig_rewards_valid = (nonzero_mask & ig_mask).sum().item()
+        ig_rewards_at_invalid = (nonzero_mask & (response_mask == 0) & (~f1_mask)).sum().item()
+        
+        print(f"[Bug2 Check] === Reward Placement Analysis ===")
+        print(f"[Bug2 Check] Total non-zero rewards: {total_rewards}")
+        print(f"[Bug2 Check]   - At response_mask=1 (valid): {rewards_at_valid_pos}")
+        print(f"[Bug2 Check]   - At response_mask=0 (INVALID): {rewards_at_invalid_pos}")
+        print(f"[Bug2 Check] F1 rewards: {f1_rewards}, InfoGain valid: {ig_rewards_valid}, InfoGain LOST: {ig_rewards_at_invalid}")
+        
+        if ig_rewards_at_invalid > 0:
+            invalid_ratio = ig_rewards_at_invalid / max(ig_rewards_valid + ig_rewards_at_invalid, 1) * 100
+            print(f"[Bug2 Check] ⚠️  BUG 2 CONFIRMED: {invalid_ratio:.1f}% of info_gain rewards at response_mask=0!")
+        else:
+            print(f"[Bug2 Check] ✓  All info_gain rewards at valid positions")
+        
+        # === Part 2: 检查 reward 是否在每个 turn 的最后一个合法位置 ===
+        # 通过 response_mask 的边界变化识别 turn 边界
+        # turn 结束位置 = response_mask 从 1 变到 0 的位置，或序列最后一个 1 的位置
+        rewards_at_turn_end = 0
+        rewards_not_at_turn_end = 0
+        total_turns_detected = 0
+        
+        for sample_idx in range(bsz):
+            sample_mask = response_mask[sample_idx]  # (seq_len,)
+            sample_rewards = token_level_rewards[sample_idx]  # (seq_len,)
+            
+            # 找到所有 turn 的最后一个合法位置
+            # turn 结束 = mask 从 1 变到 0 的前一个位置，或最后一个 1
+            turn_end_positions = []
+            
+            for t in range(seq_len):
+                if sample_mask[t] == 1:
+                    # 检查是否是这个 "1 序列" 的最后一个
+                    is_last_in_segment = (t == seq_len - 1) or (sample_mask[t + 1] == 0)
+                    if is_last_in_segment:
+                        turn_end_positions.append(t)
+            
+            total_turns_detected += len(turn_end_positions)
+            
+            # 检查 reward 位置
+            reward_positions = (sample_rewards != 0).nonzero(as_tuple=True)[0].tolist()
+            
+            for pos in reward_positions:
+                if pos in turn_end_positions:
+                    rewards_at_turn_end += 1
+                else:
+                    rewards_not_at_turn_end += 1
+        
+        print(f"[Bug2 Check] === Turn Boundary Analysis ===")
+        print(f"[Bug2 Check] Total turns detected (response_mask segments): {total_turns_detected}")
+        print(f"[Bug2 Check] Rewards at turn end positions: {rewards_at_turn_end}")
+        print(f"[Bug2 Check] Rewards NOT at turn end positions: {rewards_not_at_turn_end}")
+        
+        if rewards_not_at_turn_end > 0:
+            misplaced_ratio = rewards_not_at_turn_end / max(total_rewards, 1) * 100
+            print(f"[Bug2 Check] ⚠️  WARNING: {misplaced_ratio:.1f}% rewards not at turn boundaries!")
+        else:
+            print(f"[Bug2 Check] ✓  All rewards correctly placed at turn end positions")
+        
+        # === Part 3: 检查 discounted_returns 是否均匀 ===
         all_equal_count = 0
         varied_count = 0
         single_token_count = 0
@@ -279,15 +345,13 @@ def compute_grpo_outcome_advantage(
         total_checked = all_equal_count + varied_count
         if total_checked > 0:
             equal_ratio = all_equal_count / total_checked * 100
-            print(f"[Bug2 Check] Total samples: {bsz}, Checked: {total_checked} (skipped {single_token_count} single-token samples)")
+            print(f"[Bug2 Check] === Discounted Returns Analysis ===")
             print(f"[Bug2 Check] ALL_EQUAL: {all_equal_count} ({equal_ratio:.1f}%), VARIED: {varied_count} ({100-equal_ratio:.1f}%)")
+            
             if equal_ratio > 90:
-                print(f"[Bug2 Check] ⚠️  WARNING: {equal_ratio:.1f}% samples have uniform discounted_returns!")
-                print(f"[Bug2 Check] ⚠️  This strongly suggests info_gain rewards are NOT contributing (Bug 2 exists)!")
-            elif equal_ratio > 50:
-                print(f"[Bug2 Check] ⚠️  CAUTION: {equal_ratio:.1f}% samples have uniform values, possible partial Bug 2.")
+                print(f"[Bug2 Check] ⚠️  WARNING: Info gain rewards NOT contributing!")
             else:
-                print(f"[Bug2 Check] ✓  Info gain rewards appear to be working normally.")
+                print(f"[Bug2 Check] ✓  Info gain rewards contributing normally.")
     # ========== END DEBUG ==========
 
     return discounted_returns, discounted_returns
