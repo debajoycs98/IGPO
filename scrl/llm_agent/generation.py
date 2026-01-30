@@ -552,6 +552,10 @@ class LLMGenerationManager:
                 
                 if step == 0:
                     for i in activate_list:
+                        # 检查 gt_idx 范围是否有效
+                        if gt_idx[i][0] >= gt_idx[i][1]:
+                            # 空范围，跳过（保持 gt_values[i] 为初始值）
+                            continue
                         log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
                         mean_log_prob = log_probs.mean().item()
                         
@@ -566,6 +570,10 @@ class LLMGenerationManager:
                         gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())
                 else:
                     for i in activate_list:
+                        # 检查 gt_idx 范围是否有效
+                        if gt_idx[i][0] >= gt_idx[i][1]:
+                            # 空范围，跳过（不计算 info_gain）
+                            continue
                         log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
                         mean_log_prob = log_probs.mean().item()
                         
@@ -776,6 +784,9 @@ class LLMGenerationManager:
                     if turn_idx == 0:
                         # 第一个 turn：初始化 gt_values
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
+                            # 检查 gt_idx 范围是否有效
+                            if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
+                                continue
                             log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
                             
@@ -789,6 +800,9 @@ class LLMGenerationManager:
                     else:
                         # 后续 turns：计算 info_gain
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
+                            # 检查 gt_idx 范围是否有效
+                            if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
+                                continue
                             log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
                             

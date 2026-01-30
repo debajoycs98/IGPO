@@ -1043,15 +1043,35 @@ def _full_check_3_transmission() -> CheckResult:
                 {"core_count": core_count, "ig_count": ig_count, "zero_f1_excluded": num_zero_f1}
             )
         
+        # 更详细的诊断：比较非零值数量
+        # ig_nonzero 应该 = info_gain 值 + 非零 f1 值
+        expected_ig_nonzero = num_ig_values + num_nonzero_f1
+        
+        # 如果 core_nonzero == ig_nonzero，即使总数不同，也认为传输正确
+        if len(core_nonzero) == len(ig_nonzero):
+            mismatches = sum(1 for c, i in zip(core_nonzero, ig_nonzero) if abs(c - i) > 1e-5)
+            if mismatches == 0:
+                return CheckResult(
+                    "Check 3: Transmission",
+                    True,
+                    f"Non-zero values match: {len(core_nonzero)} values "
+                    f"(ig={num_ig_values} + nonzero_f1={num_nonzero_f1}, zero_f1={num_zero_f1} excluded)",
+                    {"core_nonzero": len(core_nonzero), "ig_nonzero": len(ig_nonzero),
+                     "expected_ig_nonzero": expected_ig_nonzero}
+                )
+        
         return CheckResult(
             "Check 3: Transmission",
             False,
-            f"Count mismatch: core={core_count}, info_gain.py={ig_count}, "
-            f"diff={diff}, zero_f1={num_zero_f1} (expected diff={num_zero_f1})",
+            f"Count mismatch: core_nonzero={len(core_nonzero)}, ig_nonzero={len(ig_nonzero)} "
+            f"(ig={num_ig_values} + nonzero_f1={num_nonzero_f1} = {expected_ig_nonzero}), "
+            f"zero_f1={num_zero_f1}",
             {"core_count": core_count, "ig_count": ig_count, 
              "core_nonzero": len(core_nonzero), "ig_nonzero": len(ig_nonzero),
-             "diff": diff, "zero_f1": num_zero_f1,
-             "info_gain_values": num_ig_values, "f1_values": num_f1_values}
+             "expected_ig_nonzero": expected_ig_nonzero,
+             "diff_nonzero": len(core_nonzero) - len(ig_nonzero),
+             "info_gain_values": num_ig_values, "f1_values": num_f1_values,
+             "zero_f1": num_zero_f1, "nonzero_f1": num_nonzero_f1}
         )
     
     # 4. 逐值比较

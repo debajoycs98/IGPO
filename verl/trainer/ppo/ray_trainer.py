@@ -806,7 +806,8 @@ class RayPPOTrainer:
                 }
                 with _timer('step', timing_raw):
                     with _timer('gen', timing_raw):
-                        ground_truths.extend([x.non_tensor_batch["reward_model"]["ground_truth"] for x in test_batch])
+                        # 每个 batch 重新初始化 ground_truths，避免累积导致数据错乱
+                        batch_ground_truths = [x.non_tensor_batch["reward_model"]["ground_truth"] for x in test_batch]
                         generation_manager.timing_raw = timing_raw
 
                         # normalize length to be divisible by total GPU count
@@ -817,14 +818,14 @@ class RayPPOTrainer:
                             # If batch size < n_gpus, keep all data (let downstream handle it)
                             norm_len = len(test_gen_batch)
                         test_gen_batch = test_gen_batch[:norm_len]
-                        ground_truths = ground_truths[:norm_len]
-                        ground_truths = [{'ground_truth': gt} for gt in ground_truths]
+                        batch_ground_truths = batch_ground_truths[:norm_len]
+                        batch_ground_truths = [{'ground_truth': gt} for gt in batch_ground_truths]
 
 
                         _, final_gen_batch_output, info_gain_rewards = generation_manager.run_llm_loop(
                             gen_batch=test_gen_batch,
                             global_steps=-self.global_steps,# 取负号代表val
-                            ground_truths=ground_truths
+                            ground_truths=batch_ground_truths
                         )
                     test_batch = test_batch[:len(final_gen_batch_output)]
                     test_batch = test_batch.union(final_gen_batch_output)

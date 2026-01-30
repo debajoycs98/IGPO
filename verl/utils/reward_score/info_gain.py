@@ -305,6 +305,19 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
     # 如果没有 info_gain_reward 或只有一个 turn，只在最后一个 token 放 f1_score
     if info_gain_reward == [] or chats_size == 1:
         scores[-1] = alpha * f1_score
+        
+        # 即使没有 info_gain，也需要记录验证数据
+        if strict_check:
+            sample_idx = getattr(compute_score, '_sample_counter', 0)
+            compute_score._sample_counter = sample_idx + 1
+            record_info_gain_assignment(
+                sample_idx=sample_idx,
+                info_gain_rewards=[],  # 没有 info_gain
+                info_gain_positions=[],
+                f1_score=alpha * f1_score,
+                f1_position=tokens_size - 1,
+            )
+        
         if is_validation:
             return {"f1": f1_score, "em": em_score, "noformatf1": noformatf1_score, "scores": scores}
         return scores
@@ -314,6 +327,19 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         print(f"info_gain.py: turn mismatch - chats_size={chats_size}, info_gain_len={len(info_gain_reward)}")
         # 长度不匹配时，回退到只使用 f1_score
         scores[-1] = alpha * f1_score
+        
+        # 即使 turn mismatch，也需要记录验证数据
+        if strict_check:
+            sample_idx = getattr(compute_score, '_sample_counter', 0)
+            compute_score._sample_counter = sample_idx + 1
+            record_info_gain_assignment(
+                sample_idx=sample_idx,
+                info_gain_rewards=[],  # 没有 info_gain
+                info_gain_positions=[],
+                f1_score=alpha * f1_score,
+                f1_position=tokens_size - 1,
+            )
+        
         if is_validation:
             return {"f1": f1_score, "em": em_score, "noformatf1": noformatf1_score, "scores": scores}
         return scores
