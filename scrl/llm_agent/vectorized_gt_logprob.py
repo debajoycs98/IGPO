@@ -1,21 +1,19 @@
 """
 IGPO Vectorized Ground Truth Log Probability Computation
 
-将 T 次 compute_log_prob 调用优化为单次调用的批量处理实现。
+Optimizes T compute_log_prob calls into a single batched call.
 
-工作原理：
-- 原始方式：在每个 turn 中调用 compute_log_prob，共 T 次调用
-- 向量化方式：收集所有 turns 的数据，在 loop 结束后批量调用一次 compute_log_prob
+How it works:
+- Original: Call compute_log_prob in each turn, resulting in T calls total
+- Vectorized: Collect data from all turns, batch call compute_log_prob once after the loop
 
-效率提升：
-- 减少 Ray 远程调用次数（从 T 次到 1 次）
-- 减少数据传输开销
-- 批量 GPU 计算效率更高
+Efficiency improvements:
+- Reduce Ray remote call count (from T to 1)
+- Reduce data transfer overhead
+- Higher GPU computation efficiency with batching
 
-启用方式（在 train_grpo.sh 中添加）:
+Enable in train.sh:
     +algorithm.use_vectorized_gt_logprob=true
-
-Author: IGPO Team
 """
 
 import os
@@ -27,25 +25,25 @@ import copy
 import math
 
 # ============================================================================
-# 全局开关
+# Global Switch
 # ============================================================================
-_VECTORIZED_ENABLED = None  # None = 未初始化, True/False = 已设置
+_VECTORIZED_ENABLED = None  # None = not initialized, True/False = set
 
 
 def is_vectorized_enabled() -> bool:
-    """检查是否启用向量化计算"""
+    """Check if vectorized computation is enabled"""
     global _VECTORIZED_ENABLED
     if _VECTORIZED_ENABLED is None:
-        # 从环境变量读取
+        # Read from environment variable
         env_val = os.environ.get('IGPO_USE_VECTORIZED_GT_LOGPROB', '').lower()
         _VECTORIZED_ENABLED = env_val in ('true', '1', 'yes')
-        # 首次初始化时打印状态
+        # Print status on first initialization
         print(f"[IGPO] Vectorized GT LogProb: {'ENABLED' if _VECTORIZED_ENABLED else 'DISABLED (default)'}")
     return _VECTORIZED_ENABLED
 
 
 def set_vectorized_enabled(enabled: bool):
-    """设置是否启用向量化计算"""
+    """Set whether vectorized computation is enabled"""
     global _VECTORIZED_ENABLED
     _VECTORIZED_ENABLED = enabled
     print(f"[IGPO] Vectorized GT LogProb: {'ENABLED' if enabled else 'DISABLED'}")
@@ -831,22 +829,22 @@ def create_vectorized_gt_computer(tokenizer) -> VectorizedGTLogProbComputer:
 
 
 # ============================================================================
-# 配置初始化函数（在 ray_trainer.py 的 fit() 开始时调用）
+# Config Initialization (called at the start of ray_trainer.py fit())
 # ============================================================================
 
 def init_from_config(config) -> bool:
     """
-    从 Hydra 配置初始化向量化开关。
+    Initialize vectorized switch from Hydra config.
     
-    在 ray_trainer.py 的 fit() 方法开始时调用此函数。
+    Call this function at the start of ray_trainer.py fit() method.
     
     Args:
-        config: Hydra OmegaConf 配置对象
+        config: Hydra OmegaConf config object
         
     Returns:
-        bool: 是否启用向量化
+        bool: Whether vectorization is enabled
     
-    配置示例 (train_grpo.sh):
+    Config example (train.sh):
         +algorithm.use_vectorized_gt_logprob=true
     """
     enabled = getattr(config.algorithm, 'use_vectorized_gt_logprob', False)
@@ -865,73 +863,22 @@ def compute_gt_logprob_with_switch(
     temperature: float = 1.0
 ) -> Tuple[List[torch.Tensor], List[Tuple[int, int]]]:
     """
-    根据全局开关选择计算方式。
+    Select computation method based on global switch.
     
     Args:
-        computer: VectorizedGTLogProbComputer 实例
-        其他参数同 compute_all_turns_vectorized
+        computer: VectorizedGTLogProbComputer instance
+        Other args same as compute_all_turns_vectorized
         
     Returns:
-        同 compute_all_turns_vectorized
+        Same as compute_all_turns_vectorized
     """
-    debug_pipeline = os.environ.get("DEBUG_IGPO_PIPELINE", "0") == "1"
-    
     if is_vectorized_enabled():
-        gt_log_probs, gt_ranges = computer.compute_all_turns_vectorized(
+        return computer.compute_all_turns_vectorized(
             model, input_ids, attention_mask, position_ids,
             ground_truth_text, turn_end_positions, temperature
         )
-        
-        # ========== DEBUG: 验证点 6 - 向量化 GT LogP 计算正确性 ==========
-        if debug_pipeline and len(gt_log_probs) > 0:
-            print(f"\n[IGPO Pipeline Check 6] === vectorized_gt_logprob.py: GT LogP Computation ===")
-            print(f"  Mode: VECTORIZED")
-            print(f"  Number of turns: {len(turn_end_positions)}")
-            print(f"  Turn end positions: {turn_end_positions}")
-            print(f"  Input sequence length: {input_ids.shape[0]}")
-            print(f"  Ground truth length: {len(ground_truth_text)} chars")
-            
-            print(f"\n  GT Log Probabilities per turn:")
-            for t, (log_probs, (start, end)) in enumerate(zip(gt_log_probs, gt_ranges)):
-                if log_probs is not None and len(log_probs) > 0:
-                    # 只在答案范围内计算统计
-                    answer_log_probs = log_probs[start:end]
-                    mean_logp = answer_log_probs.mean().item() if len(answer_log_probs) > 0 else float('nan')
-                    sum_logp = answer_log_probs.sum().item() if len(answer_log_probs) > 0 else float('nan')
-                    
-                    print(f"    Turn {t}:")
-                    print(f"      Full GT length: {len(log_probs)}")
-                    print(f"      Answer range: [{start}, {end})")
-                    print(f"      Answer tokens: {end - start}")
-                    print(f"      Mean log prob: {mean_logp:.4f}")
-                    print(f"      Sum log prob:  {sum_logp:.4f}")
-                    
-                    # 检查是否有异常值
-                    if torch.isnan(log_probs).any():
-                        print(f"      ⚠️ WARNING: Contains NaN values!")
-                    if torch.isinf(log_probs).any():
-                        print(f"      ⚠️ WARNING: Contains Inf values!")
-        
-        return gt_log_probs, gt_ranges
     else:
-        gt_log_probs, gt_ranges = computer.compute_all_turns_sequential(
+        return computer.compute_all_turns_sequential(
             model, input_ids, attention_mask, position_ids,
             ground_truth_text, turn_end_positions, temperature
         )
-        
-        # ========== DEBUG: 验证点 6 - 顺序 GT LogP 计算 ==========
-        if debug_pipeline and len(gt_log_probs) > 0:
-            print(f"\n[IGPO Pipeline Check 6] === vectorized_gt_logprob.py: GT LogP Computation ===")
-            print(f"  Mode: SEQUENTIAL")
-            print(f"  Number of turns: {len(turn_end_positions)}")
-            
-            print(f"\n  GT Log Probabilities per turn:")
-            for t, (log_probs, (start, end)) in enumerate(zip(gt_log_probs, gt_ranges)):
-                if log_probs is not None and len(log_probs) > 0:
-                    answer_log_probs = log_probs[start:end]
-                    mean_logp = answer_log_probs.mean().item() if len(answer_log_probs) > 0 else float('nan')
-                    sum_logp = answer_log_probs.sum().item() if len(answer_log_probs) > 0 else float('nan')
-                    
-                    print(f"    Turn {t}: mean={mean_logp:.4f}, sum={sum_logp:.4f}, tokens={end-start}")
-        
-        return gt_log_probs, gt_ranges

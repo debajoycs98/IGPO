@@ -6,33 +6,33 @@ import time
 
 def extract_url_root_domain(url):
     """
-    从 URL 中提取根域名
-    例如:
+    Extract root domain from URL
+    Examples:
     - https://www.example.com/path -> example.com
     - sub.example.co.uk -> example.co.uk
     """
-    # 确保 URL 包含协议，如果没有则添加
+    # Ensure URL contains protocol, add if missing
     if not url.startswith(('http://', 'https://')):
         url = 'http://' + url
     
-    # 使用 urlparse 解析 URL
+    # Use urlparse to parse URL
     parsed = urlparse(url).netloc
     if not parsed:
         parsed = url
         
-    # 移除端口号(如果存在)
+    # Remove port number (if exists)
     parsed = parsed.split(':')[0]
     
-    # 分割域名部分
+    # Split domain parts
     parts = parsed.split('.')
     
-    # 处理特殊的二级域名，如 .co.uk, .com.cn 等
+    # Handle special second-level domains like .co.uk, .com.cn etc.
     if len(parts) > 2:
         if parts[-2] in ['co', 'com', 'org', 'gov', 'edu', 'net']:
             if parts[-1] in ['uk', 'cn', 'jp', 'br', 'in']:
                 return '.'.join(parts[-3:])
     
-    # 返回主域名部分（最后两部分）
+    # Return main domain part (last two parts)
     return '.'.join(parts[-2:])
 
 def get_clean_content(line):
@@ -44,10 +44,10 @@ def get_clean_content(line):
     return clean_line
 
 def get_content_from_tag(content, tag, default_value=None):
-    # 说明：
-    # 1) (.*?) 懒惰匹配，尽量少匹配字符
-    # 2) (?=(</tag>|<\w+|$)) 使用前瞻，意味着当后面紧跟 </tag> 或 <任意单词字符开头的标签> 或文本结束时，都停止匹配
-    # 3) re.DOTALL 使得点号 . 可以匹配换行符
+    # Notes:
+    # 1) (.*?) lazy match, match as few characters as possible
+    # 2) (?=(</tag>|<\w+|$)) lookahead, stops when followed by </tag> or <tag starting with word char> or end of text
+    # 3) re.DOTALL makes dot . match newline characters
     pattern = rf"<{tag}>(.*?)(?=(</{tag}>|<\w+|$))"
     match = re.search(pattern, content, re.DOTALL)
     if match:

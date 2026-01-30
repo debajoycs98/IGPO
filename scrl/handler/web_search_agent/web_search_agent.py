@@ -20,8 +20,8 @@ from datetime import datetime
 from time import strftime, gmtime
 
 logging.basicConfig(
-    level=logging.INFO,  # 设置日志级别
-    format='%(asctime)s - %(levelname)s - %(message)s'  # 设置日志格式
+    level=logging.INFO,  # Set log level
+    format='%(asctime)s - %(levelname)s - %(message)s'  # Set log format
 )
 
 class WebSearchAgent:
@@ -41,7 +41,7 @@ class WebSearchAgent:
         }
         downloads_folder_path = f"./{self.BROWSER_CONFIG['downloads_folder']}"
         if not os.path.exists(downloads_folder_path):
-            logging.info(f"保存目录不存在，创建目录：{os.path.abspath(downloads_folder_path)}")
+            logging.info(f"Save directory does not exist, creating: {os.path.abspath(downloads_folder_path)}")
             os.makedirs(downloads_folder_path, exist_ok=True)
         
         self.search_history = {}
@@ -52,7 +52,7 @@ class WebSearchAgent:
     def save(self):
         with open(self.config.query_save_path, 'w', encoding='utf-8') as f:
             json.dump(self.search_history, f, indent=4, ensure_ascii=False)
-        print("保存完毕")
+        print("Save completed")
     
     def browser_to_json(self, browser: SimpleTextBrowser, title: str, url: str):
         page_list = []
@@ -61,7 +61,7 @@ class WebSearchAgent:
             cur_web_page_content = browser._state()[1]
             page_list.append(cur_web_page_content)
             browser.page_down()
-        # 提取browser的内容，取成一个json，然后保存到数据库
+        # Extract browser content into json and save to database
         return {
             "title": title,
             "url": url,
@@ -69,7 +69,7 @@ class WebSearchAgent:
         }
     
     def scrape(self, browser, url: str) -> str:
-        """爬取网页并使用LLM总结内容"""
+        """Scrape webpage and summarize content using LLM"""
         browser.visit_page(url)
         header, content = browser._state()
         return header.strip() + "\n=======================\n" + content
@@ -120,7 +120,7 @@ class WebSearchAgent:
             return None
         
         if self.is_error_page(browser):
-            logging.info(f"访问错误，抛弃URL：{web_info['link']}")
+            logging.info(f"Access error, discarding URL: {web_info['link']}")
             return None
         
         with self.url_browser_dict_lock:
@@ -135,7 +135,7 @@ class WebSearchAgent:
             return None
         
         if self.is_error_page(browser):
-            logging.info(f"访问错误，抛弃URL：{url}")
+            logging.info(f"Access error, discarding URL: {url}")
             return None
         return browser
     

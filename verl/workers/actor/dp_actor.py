@@ -31,12 +31,6 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty
 from verl.utils.debug import GPUMemoryLogger
-# IGPO 完整验证
-try:
-    from verl.utils.debug import is_full_check_enabled, get_full_checker
-    _HAS_FULL_CHECK = True
-except ImportError:
-    _HAS_FULL_CHECK = False
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import logprobs_from_logits
@@ -366,17 +360,12 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
-                
-                # ========== 完整验证：记录梯度 ==========
-                if _HAS_FULL_CHECK and is_full_check_enabled():
-                    checker = get_full_checker()
-                    checker.record_gradients(grad_norm=grad_norm.detach().item())
                 data = {"actor/grad_norm": grad_norm.detach().item()}
             append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
         return metrics
     def process_response_mask(self, responses, response_mask, tokenizer):
-        # 前提假设，responses一定是在assitant\n后面紧接着的
+        # Assumption: responses always immediately follow assistant\n
         assistant_start = "<|im_start|>assistant\n"
         assistant_start_tokens = tokenizer.encode(assistant_start, add_special_tokens=False)
         assistant_end = "<|im_end|>"
@@ -402,16 +391,16 @@ class DataParallelPPOActor(BasePPOActor):
                         break
 
                 if end_pos == -1:
-                    # 如果response以pad_token结尾，还需要mask掉pad_token
+                    # If response ends with pad_token, also need to mask pad_token
                     end_pos = len(response_tokens)
                     while end_pos > start_pos and response_tokens[end_pos - 1] == tokenizer.pad_token_id:
                         end_pos -= 1
                     new_response_mask[i, start_pos-start_tokens_len:end_pos-start_tokens_len] = 1
-                    break  # 无效的区间，直接退出
-                # 标记模型生成部分为有效
+                    break  # Invalid range, exit directly
+                # Mark model generated part as valid
                 new_response_mask[i, start_pos-start_tokens_len:end_pos-start_tokens_len] = 1
 
-                # 更新索引，继续搜索下一个区间
+                # Update index, continue searching for next range
                 idx = end_pos + len(assistant_end_tokens)
 
         return response_mask * new_response_mask

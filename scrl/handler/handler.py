@@ -47,7 +47,7 @@ class Handler:
             print(f"Error in search_and_add_to_dict for query '{search_query}': {str(e)}")
     
     def handle_execution_api(self, query_contents: List[dict]):
-        print("开始处理函数调用")
+        print("Starting function call processing")
         cur_api_result_dict = {}
         cur_api_result_dict_lock = threading.Lock()
         cache_hit = 0
@@ -76,14 +76,14 @@ class Handler:
                     "organic": []
                 }
         if total_search_call > 0:
-            print(f"本轮总共调用{total_search_call}次，命中{cache_hit}次，命中率为：{cache_hit/total_search_call}", flush=True)
+            print(f"Total calls this round: {total_search_call}, cache hits: {cache_hit}, hit rate: {cache_hit/total_search_call}", flush=True)
         start_time = time.time()
         api_future_list = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=1000) as api_executor:
             for search_query in cur_api_result_dict:
                 api_future = api_executor.submit(self.search_and_add_to_dict, search_query, cur_api_result_dict, cur_api_result_dict_lock)
                 api_future_list.append(api_future)
-        print(f"搜索用时{time.time()-start_time}", flush=True)
+        print(f"Search time: {time.time()-start_time}", flush=True)
         
         for api_future in concurrent.futures.as_completed(api_future_list):
             api_future.result()
@@ -93,18 +93,18 @@ class Handler:
             
         with open(self.agent_config["query_save_path"], 'w', encoding='utf-8') as f:
             json.dump(self.api_result_dict, f, indent=4, ensure_ascii=False)
-        print("缓存已保存", flush=True)
+        print("Cache saved", flush=True)
         start_time = time.time()
         future_to_content = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=1000) as handle_executor:
             for query_content in query_contents:
                 future = handle_executor.submit(self.handle_single_query, query_content, self.api_result_dict)
                 future_to_content.append(future)
-            # 等待所有任务完成
+            # Wait for all tasks to complete
         for i, future in enumerate(future_to_content):
             query_contents[i]["content"] = future.result()
-        print(f"爬取/阅读网页用时{time.time()-start_time}")
-        print("处理函数调用结束")
+        print(f"Web scraping/reading time: {time.time()-start_time}")
+        print("Function call processing completed")
         return query_contents
 
     # def handle_execution(self):
@@ -208,7 +208,7 @@ class Handler:
                     has_query = True
                 else:
                     time.sleep(10)
-            print("开始处理函数调用")
+            print("Starting function call processing")
             with open(self.handler_config.signal_writing_file, 'r', encoding='utf-8') as f:
                 signal_contents = json.load(f)
             assert signal_contents['signal'] == self.handler_config.QUERY_SIGNAL
@@ -241,7 +241,7 @@ class Handler:
 
             with open(self.handler_config.signal_writing_file, 'w', encoding='utf-8') as f:
                 json.dump({'signal': self.handler_config.RESPONSE_SIGNAL}, f, indent=4, ensure_ascii=False)
-            print("处理函数调用结束")
+            print("Function call processing completed")
     
     def post_request(self, server_url: str, query_contents: List[dict],server_cnt):
         depth = 0
@@ -262,7 +262,7 @@ class Handler:
             idx = query_content["idx"]
             question = query_content["question"]
             if idx in self.id_to_context:
-                # 如果question不一致，清除缓存
+                # If question doesn't match, clear cache
                 if len(self.id_to_context[idx]) > 0 and question != self.id_to_context[idx][0].user_query:
                     with self.id_to_context_lock:
                         self.id_to_context[idx] = []
@@ -372,7 +372,7 @@ if __name__ == "__main__":
         QUERY_SIGNAL=1,
     )
     client = OpenAI(
-        api_key="sk-9b7fbda4dd9b4442a0e473dc5a039aa7", # 如何获取API Key：https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
+        api_key="sk-9b7fbda4dd9b4442a0e473dc5a039aa7",  # How to get API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
     handler = Handler(agent_config=config, client=client, handler_config=handler_config)

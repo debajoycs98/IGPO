@@ -27,32 +27,6 @@ from scrl.llm_agent.vectorized_gt_logprob import (
 )
 import math
 
-# 导入严格验证模块
-try:
-    from verl.utils.debug.igpo_pipeline_checker import (
-        is_strict_check_enabled,
-        record_generation_info_gain,
-        verify_vectorized_vs_sequential,
-        reset_checkpoint,
-        save_results_for_comparison,
-    )
-    _HAS_STRICT_CHECK = True
-except ImportError:
-    _HAS_STRICT_CHECK = False
-    def is_strict_check_enabled(): return False
-    def save_results_for_comparison(mode): pass
-
-# 导入完整验证模块
-try:
-    from verl.utils.debug.igpo_full_checker import (
-        is_full_check_enabled,
-        get_full_checker,
-        reset_full_checker,
-    )
-    _HAS_FULL_CHECK = True
-except ImportError:
-    _HAS_FULL_CHECK = False
-    def is_full_check_enabled(): return False
 from dataclasses import dataclass
 from tensordict import TensorDict
 from scrl.llm_agent.tensor_helper import TensorHelper, TensorConfig
@@ -81,7 +55,7 @@ class GenerationConfig:
     oss_endpoint: str = ''
     system_prompt: Optional[str] = SYSTEM_PROMPT
     codeact_env_disabled: bool = True
-    # info_gain_type: "prob_diff" (概率差) 或 "log_prob_diff" (log概率差)
+    # info_gain_type: "prob_diff" (probability difference) or "log_prob_diff" (log probability difference)
     info_gain_type: str = "prob_diff"
     
 
@@ -255,7 +229,7 @@ class LLMGenerationManager:
                             print(f"model tool call format error: {e}")
                             print(content.replace('<|endoftext|>',''))
                         results.append((True, "", ""))
-            elif "<think>" in content and "<code>" in content and not self.codeact_env_disabled:  # code act格式
+            elif "<think>" in content and "<code>" in content and not self.codeact_env_disabled:  # code act format
                 if "</code>" not in content or "</think>" not in content:
                     results.append((True, "", ""))
                 else:
@@ -328,14 +302,14 @@ class LLMGenerationManager:
                             break
                     gt['ground_truth'] = label
 
-        # 预处理ground_truths 对齐batch_size * n
+        # Preprocess ground_truths to align with batch_size * n
         ground_truths_rolling = []
         for gt in ground_truths:
             for _ in range(self.config.n):
                 ground_truths_rolling.append(gt)
 
-        # 使用 offset_mapping 精确计算 ground truth 的 token 范围
-        # 避免 subword tokenization 边界效应导致的索引偏差
+        # Use offset_mapping to precisely calculate ground truth token range
+        # Avoid index offset caused by subword tokenization boundary effects
         PREFIX = "\nNow there's enough information to answer\n</think>\n<answer>\n"
         SUFFIX = "\n</answer><|im_end|>"
         
@@ -346,7 +320,7 @@ class LLMGenerationManager:
             gt_text = ground_truth['ground_truth']
             full_text = f"{PREFIX}{gt_text}{SUFFIX}"
             
-            # 使用 offset_mapping 获取精确的字符-token 映射
+            # Use offset_mapping to get precise character-token mapping
             encoding = self.tokenizer(full_text, return_tensors="pt", return_offsets_mapping=True)
             token_ids = encoding['input_ids'].tolist()[0]
             offset_mapping = encoding['offset_mapping'].tolist()[0]  # [(char_start, char_end), ...]
@@ -358,23 +332,23 @@ class LLMGenerationManager:
                 gt_idx.append([0, 0])
                 continue
             
-            # 计算 ground truth 在原始字符串中的位置
+            # Calculate ground truth position in original string
             gt_char_start = len(PREFIX)
             gt_char_end = len(PREFIX) + len(gt_text)
             
-            # 通过 offset_mapping 找到精确的 token 索引
+            # Find precise token indices through offset_mapping
             gt_token_start = None
             gt_token_end = None
             
             for token_idx, (char_start, char_end) in enumerate(offset_mapping):
-                # 找到第一个覆盖 gt_char_start 的 token
+                # Find the first token covering gt_char_start
                 if gt_token_start is None and char_end > gt_char_start:
                     gt_token_start = token_idx
-                # 找到最后一个覆盖 gt 内容的 token（char_start < gt_char_end）
+                # Find the last token covering gt content (char_start < gt_char_end)
                 if char_start < gt_char_end and char_end > 0:
                     gt_token_end = token_idx + 1
             
-            # 边界检查
+            # Boundary check
             if gt_token_start is None:
                 gt_token_start = len(token_ids)
             if gt_token_end is None:
@@ -399,7 +373,7 @@ class LLMGenerationManager:
         activate_list = [i for i in range(len(messages_list))]
         message_string_list = ["" for _ in range(len(messages_list))]
 
-        # 确保保存目录存在（仅在 project_name 和 experiment_name 有效时创建）
+        # Ensure output directory exists (only create when project_name and experiment_name are valid)
         output_dir = None
         if self.config.project_name and self.config.experiment_name:
             output_dir = f"./outputs/{self.config.project_name}/{self.config.experiment_name}/rollout"
@@ -407,23 +381,23 @@ class LLMGenerationManager:
                 print(f"Directory not exist, create at {output_dir}")
                 os.makedirs(output_dir, exist_ok=True)
         
-        # 创建information gain reward：list[list]
+        # Create information gain reward: list[list]
         gt_log_probs_per_turn = [[] for _ in range(len(messages_list))]
         gt_entropys_per_turn = [[] for _ in range(len(messages_list))]
         info_gain_rewards = [[] for _ in range(len(messages_list))]
-        gt_values = {}  # 存储上一轮的值（概率或log概率，取决于 info_gain_type）
+        gt_values = {}  # Store previous turn's value (probability or log probability, depending on info_gain_type)
 
-        # 向量化开关检测
+        # Vectorized switch detection
         use_vectorized_gt_logprob = is_vectorized_enabled()
         
-        # ========== 向量化计算：数据收集结构 ==========
-        # 当启用向量化时，延迟计算 GT log probs，在 loop 结束后批量处理
+        # ========== Vectorized computation: data collection structure ==========
+        # When vectorization is enabled, delay GT log probs computation for batch processing after loop
         vectorized_data_collector = None
         if use_vectorized_gt_logprob:
             vectorized_data_collector = {
-                'pseudo_outputs_per_turn': [],  # 每个 turn 的 pseudo_gen_output 列表
-                'activate_lists_per_turn': [],  # 每个 turn 的 activate_list
-                'gt_idx': gt_idx,  # GT token 范围
+                'pseudo_outputs_per_turn': [],  # List of pseudo_gen_output for each turn
+                'activate_lists_per_turn': [],  # activate_list for each turn
+                'gt_idx': gt_idx,  # GT token range
                 'num_samples': len(messages_list),
             }
             print(f"[IGPO] Vectorized GT LogProb: Collecting data for batch computation...")
@@ -439,7 +413,7 @@ class LLMGenerationManager:
             except Exception as e:
                 print(f"Error in tokenizer.apply_chat_template: {e}")
                 json.dump(activate_messages_list, open('./debug.json', 'w'))
-                # 回退策略：逐个处理每条消息
+                # Fallback strategy: process each message individually
                 rollings_active = []
                 for msg in activate_messages_list:
                     try:
@@ -448,7 +422,7 @@ class LLMGenerationManager:
                     except Exception as inner_e:
                         print(f"Failed to process message: {inner_e}")
                         print(f"Message content: {msg}")
-                        raise  # 无法恢复，抛出异常
+                        raise  # Cannot recover, raise exception
     
             think = True
             
@@ -484,19 +458,19 @@ class LLMGenerationManager:
                         mode='constant',
                         value=self.tokenizer.pad_token_id,
                        )
-
+					
                     info_gain_rollings_active.batch['attention_mask'] = F.pad(
                         info_gain_rollings_active.batch['attention_mask'], 
                         pad=(0, rollings_active.batch['attention_mask'].shape[1] - info_gain_rollings_active.batch['attention_mask'].shape[1]),
                         mode='constant',
-                        value=0,  # attention_mask 用 0 填充表示 padding 位置
+                        value=0,  # attention_mask uses 0 for padding positions
                         )
 
                     info_gain_rollings_active.batch['position_ids'] = F.pad(
                         info_gain_rollings_active.batch['position_ids'], 
                         pad=(0, rollings_active.batch['position_ids'].shape[1] - info_gain_rollings_active.batch['position_ids'].shape[1]),
                         mode='constant',
-                        value=0,  # position_ids 用 0 填充
+                        value=0,  # position_ids uses 0 for padding
                         )
                 
                     for i in range(len(activate_list)):
@@ -527,10 +501,10 @@ class LLMGenerationManager:
                 print("pseudo_gen_output responses shape:", pseudo_gen_output.batch['responses'].shape)
                 print("pseudo_gen_output input_ids shape:", pseudo_gen_output.batch['input_ids'].shape)
             
-            # ========== GT LogProb 计算（向量化或即时） ==========
+            # ========== GT LogProb computation (vectorized or immediate) ==========
             if use_vectorized_gt_logprob and vectorized_data_collector is not None:
-                # 向量化模式：收集数据，延迟计算
-                # 保存当前 turn 的 pseudo_gen_output（需要 clone 以避免被后续修改）
+                # Vectorized mode: collect data, delay computation
+                # Save current turn's pseudo_gen_output (need clone to avoid modification by subsequent operations)
                 pseudo_output_clone = DataProto.from_dict({
                     'prompts': pseudo_gen_output.batch['prompts'].clone(),
                     'responses': pseudo_gen_output.batch['responses'].clone(),
@@ -541,67 +515,55 @@ class LLMGenerationManager:
                 vectorized_data_collector['pseudo_outputs_per_turn'].append(pseudo_output_clone)
                 vectorized_data_collector['activate_lists_per_turn'].append(list(activate_list))
             else:
-                # 原始模式：即时计算
+                # Original mode: immediate computation
                 pseudo_gen_output_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
                 
-                # ========== 根据 info_gain_type 计算 info_gain_reward ==========
-                # "prob_diff": 使用概率差 exp(mean(log P_t)) - exp(mean(log P_{t-1}))
-                # "log_prob_diff": 使用 log 概率差 mean(log P_t) - mean(log P_{t-1})
+                # ========== Compute info_gain_reward based on info_gain_type ==========
+                # "prob_diff": Use probability difference exp(mean(log P_t)) - exp(mean(log P_{t-1}))
+                # "log_prob_diff": Use log probability difference mean(log P_t) - mean(log P_{t-1})
                 
-                info_gain_type = self.config.info_gain_type  # "prob_diff" 或 "log_prob_diff"
+                info_gain_type = self.config.info_gain_type  # "prob_diff" or "log_prob_diff"
                 
                 if step == 0:
                     for i in activate_list:
-                        # 检查 gt_idx 范围是否有效
+                        # Check if gt_idx range is valid
                         if gt_idx[i][0] >= gt_idx[i][1]:
-                            # 空范围，跳过（保持 gt_values[i] 为初始值）
+                            # Empty range, skip (keep gt_values[i] at initial value)
                             continue
                         log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
                         mean_log_prob = log_probs.mean().item()
                         
                         if info_gain_type == "log_prob_diff":
-                            # 存储 log 概率的均值
+                            # Store mean of log probabilities
                             gt_values[i] = mean_log_prob
-                        else:  # "prob_diff" (默认)
-                            # 存储概率的几何平均（即 exp(mean(log P))）
+                        else:  # "prob_diff" (default)
+                            # Store geometric mean of probabilities (i.e., exp(mean(log P)))
                             gt_values[i] = torch.exp(torch.tensor(mean_log_prob)).item()
                         
                         gt_log_probs_per_turn[i].append(log_probs.tolist())
                         gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())
                 else:
                     for i in activate_list:
-                        # 检查 gt_idx 范围是否有效
+                        # Check if gt_idx range is valid
                         if gt_idx[i][0] >= gt_idx[i][1]:
-                            # 空范围，跳过（不计算 info_gain）
+                            # Empty range, skip (don't compute info_gain)
                             continue
                         log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
                         mean_log_prob = log_probs.mean().item()
                         
-                        prev_value = gt_values[i]  # 保存前一个值用于验证
+                        prev_value = gt_values[i]  # Save previous value for verification
                         
                         if info_gain_type == "log_prob_diff":
-                            # 使用 log 概率差
+                            # Use log probability difference
                             cur_value = mean_log_prob
                             info_gain = cur_value - gt_values[i]
-                        else:  # "prob_diff" (默认)
-                            # 使用概率差
+                        else:  # "prob_diff" (default)
+                            # Use probability difference
                             cur_value = torch.exp(torch.tensor(mean_log_prob)).item()
                             info_gain = cur_value - gt_values[i]
                         
                         info_gain_rewards[i].append(info_gain)
                         gt_values[i] = cur_value
-                        
-                        # ========== 完整验证：记录 Info Gain 计算过程 ==========
-                        if _HAS_FULL_CHECK and is_full_check_enabled():
-                            checker = get_full_checker()
-                            turn_idx = len(info_gain_rewards[i]) - 1
-                            checker.record_info_gain_calculation(
-                                sample_idx=i,
-                                turn_idx=turn_idx,
-                                prev_value=prev_value,
-                                curr_value=cur_value,
-                                info_gain=info_gain,
-                            )
                         
                         gt_log_probs_per_turn[i].append(log_probs.tolist())
                         gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())       
@@ -612,7 +574,7 @@ class LLMGenerationManager:
             print(f"node {node_rank}, turn {step} gen_output {len(gen_output.batch['responses'])} datas")
 
             results = self.parse_response(gen_output.batch['responses'], think=think)
-            assert len(results) == len(activate_list) # 每一轮更新后，结果数量和当前活跃的query数量一致
+            assert len(results) == len(activate_list)  # After each round update, result count equals active query count
             activate_list_copy = []
             tool_call_list = []
             for i in range(len(results)):
@@ -625,7 +587,7 @@ class LLMGenerationManager:
             tool_call_list = self.execute_predictions(tool_call_list,len(messages_list))
             print(f"node {node_rank}, turn {step} tool_call_list {len(tool_call_list)} datas")
             for i in range(len(tool_call_list)):
-                if not self.codeact_env_disabled:  # code act激活
+                if not self.codeact_env_disabled:  # code act enabled
                     messages_list[tool_call_list[i]['idx']].append(
                         {
                             "role": "assistant", 
@@ -643,7 +605,7 @@ class LLMGenerationManager:
                         messages_list[tool_call_list[i]['idx']].append(
                             {
                                 "role": "user", 
-                                "content": "<code_response>" + '返回格式错误，code执行失败' + "</code_response>",
+                                "content": "<code_response>" + 'Return format error, code execution failed' + "</code_response>",
                             }
                         )
                 else:
@@ -672,34 +634,34 @@ class LLMGenerationManager:
                             {
                                 "role": "tool", 
                                 "name": '',
-                                "content": '返回格式错误，tool调用失败'
+                                "content": 'Return format error, tool call failed'
                             }
                         )
-            print(f"第{step}轮结束， node {node_rank} 原本有{len(activate_list)}个query，现在有{len(activate_list_copy)}个query")
+            print(f"Turn {step} ended, node {node_rank} originally had {len(activate_list)} queries, now has {len(activate_list_copy)} queries")
             activate_list = activate_list_copy
            
         
-        # ========== 向量化 GT LogProb 批量计算 ==========
+        # ========== Vectorized GT LogProb batch computation ==========
         if use_vectorized_gt_logprob and vectorized_data_collector is not None:
             num_turns_collected = len(vectorized_data_collector['pseudo_outputs_per_turn'])
             if num_turns_collected > 0:
                 print(f"[IGPO] Vectorized GT LogProb: Processing {num_turns_collected} turns in batch...")
                 
-                # 批量计算所有 turns 的 GT log probs
+                # Batch compute GT log probs for all turns
                 info_gain_type = self.config.info_gain_type
                 all_log_probs_results = []
                 
-                # 方案：将所有 turns 的数据合并成一个大 batch，一次性调用 compute_log_prob
-                # 注意：每个 turn 的 batch_size 可能不同（因为活跃样本数不同）
-                # 为了简化，我们按 turn 顺序处理，但只调用一次 compute_log_prob（合并所有数据）
+                # Strategy: Merge all turns' data into one large batch, call compute_log_prob once
+                # Note: Each turn's batch_size may differ (due to different active sample counts)
+                # For simplicity, we process in turn order but only call compute_log_prob once (merged data)
                 
-                # 收集所有 pseudo_outputs，找到最大序列长度
+                # Collect all pseudo_outputs, find max sequence length
                 all_input_ids = []
                 all_attention_mask = []
                 all_position_ids = []
                 all_prompts = []
                 all_responses = []
-                turn_boundaries = [0]  # 每个 turn 在合并 batch 中的起始位置
+                turn_boundaries = [0]  # Start position of each turn in merged batch
                 
                 for turn_idx, pseudo_output in enumerate(vectorized_data_collector['pseudo_outputs_per_turn']):
                     batch_size = pseudo_output.batch['input_ids'].shape[0]
@@ -710,7 +672,7 @@ class LLMGenerationManager:
                     all_responses.append(pseudo_output.batch['responses'])
                     turn_boundaries.append(turn_boundaries[-1] + batch_size)
                 
-                # 找到最大长度并 pad
+                # Find max length and pad
                 max_seq_len = max(t.shape[1] for t in all_input_ids)
                 max_prompt_len = max(t.shape[1] for t in all_prompts)
                 max_response_len = max(t.shape[1] for t in all_responses)
@@ -747,7 +709,7 @@ class LLMGenerationManager:
                     else:
                         padded_responses.append(all_responses[i])
                 
-                # 合并成一个大 batch
+                # Merge into one large batch
                 merged_input_ids = torch.cat(padded_input_ids, dim=0)
                 merged_attention_mask = torch.cat(padded_attention_mask, dim=0)
                 merged_position_ids = torch.cat(padded_position_ids, dim=0)
@@ -764,12 +726,12 @@ class LLMGenerationManager:
                 
                 print(f"[IGPO] Vectorized: Merged batch size = {merged_input_ids.shape[0]}, seq_len = {merged_input_ids.shape[1]}")
                 
-                # 一次性调用 compute_log_prob
+                # Call compute_log_prob once
                 merged_log_probs = self.actor_rollout_wg.compute_log_prob(merged_batch)
                 
                 print(f"[IGPO] Vectorized: compute_log_prob completed")
                 
-                # 从合并结果中提取各个 turn 的结果，并计算 info_gain_rewards
+                # Extract each turn's results from merged results and compute info_gain_rewards
                 gt_idx = vectorized_data_collector['gt_idx']
                 
                 for turn_idx in range(num_turns_collected):
@@ -777,14 +739,14 @@ class LLMGenerationManager:
                     end_idx = turn_boundaries[turn_idx + 1]
                     activate_list_for_turn = vectorized_data_collector['activate_lists_per_turn'][turn_idx]
                     
-                    # 提取当前 turn 的 log_probs
+                    # Extract current turn's log_probs
                     turn_old_log_probs = merged_log_probs.batch['old_log_probs'][start_idx:end_idx]
                     turn_entropys = merged_log_probs.batch['entropys'][start_idx:end_idx]
                     
                     if turn_idx == 0:
-                        # 第一个 turn：初始化 gt_values
+                        # First turn: initialize gt_values
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
-                            # 检查 gt_idx 范围是否有效
+                            # Check if gt_idx range is valid
                             if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
                                 continue
                             log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
@@ -798,9 +760,9 @@ class LLMGenerationManager:
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
                             gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
                     else:
-                        # 后续 turns：计算 info_gain
+                        # Subsequent turns: compute info_gain
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
-                            # 检查 gt_idx 范围是否有效
+                            # Check if gt_idx range is valid
                             if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
                                 continue
                             log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
@@ -818,8 +780,8 @@ class LLMGenerationManager:
                             
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
                             gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
-                
-                # 统计并打印结果
+        
+                # Statistics and print results
                 total_info_gains = sum(len(r) for r in info_gain_rewards)
                 print(f"[IGPO] Vectorized GT LogProb COMPLETED: "
                       f"{num_turns_collected} turns, "
@@ -828,7 +790,7 @@ class LLMGenerationManager:
             else:
                 print(f"[IGPO] Vectorized GT LogProb: No turns collected (all samples may have finished early)")
         
-        # 保存 gt_log_probs 到本地输出目录（如果需要调试，可取消注释）
+        # Save gt_log_probs to local output directory (uncomment for debugging if needed)
         # gt_log_probs_path = os.path.join(output_dir, f"gt_log_probs_{global_steps}.json")
         # with open(gt_log_probs_path, 'w') as f:
         #     json.dump({"gt_log_probs_per_turn": gt_log_probs_per_turn, "gt_entropys_per_turn": gt_entropys_per_turn}, f)
@@ -869,38 +831,8 @@ class LLMGenerationManager:
         })
         message_tensor.meta_info.update(meta_info)
         message_tensor.non_tensor_batch['agent_grpo_idx'] = np.array(agent_grpo_idx, dtype=object)
-        print("generation结束")
+        print("generation completed")
 
         print(f"node {node_rank} message_string_list {len(message_string_list)}")
 
-        # ========== 严格验证：记录 generation 阶段的 info_gain_rewards ==========
-        strict_check = _HAS_STRICT_CHECK and is_strict_check_enabled()
-        if strict_check:
-            # 重置 checkpoint
-            reset_checkpoint()
-            # 重置 info_gain.py 中的样本计数器
-            try:
-                from verl.utils.reward_score.info_gain import compute_score
-                compute_score._sample_counter = 0
-            except:
-                pass
-            
-            mode = "vectorized" if is_vectorized_enabled() else "sequential"
-            for i, rewards in enumerate(info_gain_rewards):
-                if len(rewards) > 0:
-                    record_generation_info_gain(
-                        sample_idx=i,
-                        info_gain_rewards=rewards,
-                        mode=mode,
-                    )
-            
-            print(f"\n[IGPO Strict Check] Generation phase completed:")
-            print(f"  Mode: {mode}")
-            print(f"  Samples with rewards: {sum(1 for r in info_gain_rewards if len(r) > 0)}/{len(info_gain_rewards)}")
-            print(f"  Total info_gain values: {sum(len(r) for r in info_gain_rewards)}")
-            
-            # 保存结果用于向量化 vs 顺序对比
-            save_results_for_comparison(mode)
-
         return message_string_list, message_tensor, info_gain_rewards
-    

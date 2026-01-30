@@ -18,7 +18,7 @@ def _default_compute_score(data_source, prompt_str, solution_str, ground_truth, 
     if type(data_source) != str:
         reslist = []
         if val_type == 'llm':
-            # llm只支持batch模式
+            # llm only supports batch mode
             from . import llm_judge
             reslist = llm_judge.compute_score_batch(prompt_str, solution_str, ground_truth, data_source, batch_size)
         else:

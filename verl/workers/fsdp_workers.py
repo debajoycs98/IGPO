@@ -99,7 +99,7 @@ class ActorRolloutRefWorker(Worker):
 #         print(world_size,self.ulysses_sequence_parallel_size,dp)
 #         import os
 
-#         # 打印所有环境变量
+#         # Print all environment variables
 #         for key, value in os.environ.items():
 #             print(f"{key}: {value}")
 

@@ -81,13 +81,13 @@ class GroupBatchRewardManager:
 
     def reduce_grouped_data_pairwise(self, grouped_data: Dict[str, List], operator):
         # group wise reduce
-        # 这里可以算很多东西，比如 lambda x,y: is_equal(x['solution_str'], x['ground_truth']) + is_equal(y['solution_str'], y['ground_truth'])
+        # Can compute many things here, e.g. lambda x,y: is_equal(x['solution_str'], x['ground_truth']) + is_equal(y['solution_str'], y['ground_truth'])
         #  lambda x,y: is_equal(x['solution_str'], x['ground_truth'])
         return reduce(operator, [param for uidr, param in grouped_data.items()])
 
     def reduce_grouped_data_listrwise(self, grouped_data: Dict[str, List], operator):
         # group wise reduce
-        # 这里可以算很多东西，比如 lambda x,y: is_equal(x['solution_str'], x['ground_truth']) + is_equal(y['solution_str'], y['ground_truth'])
+        # Can compute many things here, e.g. lambda x,y: is_equal(x['solution_str'], x['ground_truth']) + is_equal(y['solution_str'], y['ground_truth'])
         #  lambda x,y: is_equal(x['solution_str'], x['ground_truth'])
         return operator(filter(lambda x: x['result'], [param for uidr, param in grouped_data.items()]))
 
@@ -95,12 +95,12 @@ class GroupBatchRewardManager:
         messages = [
             {
                 "role": 'user',
-                "content": f"""请检查以下 pred answer 是否客观合理
+                "content": f"""Please check if the following pred answer is objectively reasonable
 <question> {question} </question>
 <ground truth answers> {ground_truth} </ground truth answers>
 <pred answer> {answer} </pred answer>
 
-使用<judge>yes/no</judge>输出"""
+Output using <judge>yes/no</judge>"""
             }
         ]
         return messages
@@ -108,7 +108,7 @@ class GroupBatchRewardManager:
     def rm_judge_score(self, rm_response) -> float:  # sample wise reward
         think, rm_response = filter_think(rm_response)
         result = re.findall(r'<judge>(.*?)</judge>', rm_response)
-        # 后处理逻辑
+        # Post-processing logic
         if len(result) > 0 and result[-1] == 'yes':
             return {"score": 0.2, "judge_valid": 1}
         elif len(result) > 0 and result[-1] == 'no':
@@ -125,7 +125,7 @@ class GroupBatchRewardManager:
             answers.append(f"<answers_{uidr}>{solution_str}</answers_{uidr}>")
         gp_answer = '\n'.join(answers)
         messages = [
-            {"role": "system", "content": """请根据给出的 <question> 和 不同$id对应的 <answer_$id>，对answers进行各自打分，打分格式为 <judge_$id>0~10</judge_$id>"""},
+            {"role": "system", "content": """Based on the given <question> and <answer_$id> for different $ids, score each answer using format <judge_$id>0~10</judge_$id>"""},
             {"role": "user", "content": f"<question>{question}</question>\n\n<grount_truth>{ground_truth}</ground_truth>\n\n{gp_answer}"}
         ]
         return messages
@@ -171,7 +171,7 @@ class GroupBatchRewardManager:
             answer_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
             messages = self.build_message(question=question_str, answer=answer_str, ground_truth=ground_truth)
-            # 创建异步任务
+            # Create async task
             tasks.append(self.call_llm(messages, semaphore))
             param = dict(data_source=data_source,
                          solution_str=answer_str,
@@ -201,7 +201,7 @@ class GroupBatchRewardManager:
         total_scores.append(rule_scores)
 
         # update rm_score
-        # gather 并发执行所有任务，保持顺序一致
+        # gather executes all tasks concurrently, maintaining order
         rm_responses = await asyncio.gather(*tasks)
         if rm_responses:
             for i in range(len(data)):
@@ -215,7 +215,7 @@ class GroupBatchRewardManager:
         total_scores.append(rm_scores)
 
         # update gp_rm_score
-        # gather 并发执行所有任务，保持顺序一致
+        # gather executes all tasks concurrently, maintaining order
         rm_responses_gp = await asyncio.gather(*tasks_grouped)
         if rm_responses_gp:
             # uid -> map

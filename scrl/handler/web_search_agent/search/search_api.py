@@ -145,11 +145,11 @@ def grt_search(
 
 
 def extract_full_hostname(url):
-    # 正则匹配主机名
+    # Regex match hostname
     match = re.search(r'(?:https?://)?([^:/\s]+)', url)
     if match:
         hostname = match.group(1)
-        # 去掉端口号
+        # Remove port number
         return hostname.split(':')[0]
     return None
 

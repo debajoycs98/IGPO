@@ -21,7 +21,7 @@ handler_config = SimpleNamespace(
     QUERY_SIGNAL=1,
 )
 client = OpenAI(
-    api_key="sk-9b7fbda4dd9b4442a0e473dc5a039aa7", # 如何获取API Key：https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
+    api_key="sk-9b7fbda4dd9b4442a0e473dc5a039aa7",  # How to get API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
 )
 query_save_path_dir = os.path.dirname(config["query_save_path"])
@@ -34,21 +34,21 @@ handler = Handler(agent_config=config, client=client, handler_config=handler_con
 @app.route('/handle_execution', methods=['POST'])
 def handle_execution():
     """
-    处理查询请求的接口
-    接收query_contents参数，返回处理后的结果
+    API endpoint for handling query requests
+    Receives query_contents parameter, returns processed results
     """
     try:
-        # 获取请求数据
+        # Get request data
         query_contents = request.json.get('query_contents', [])
         if not query_contents:
             return jsonify({"error": "Missing query_contents parameter"}), 400
         query_contents = handler.handle_execution_api(query_contents)
         return jsonify({"query_contents": query_contents}), 200
     except Exception as e:
-        print(f"处理请求时出错: {e}")
-        print(f"错误详情:\n{traceback.format_exc()}")
+        print(f"Error processing request: {e}")
+        print(f"Error details:\n{traceback.format_exc()}")
         return jsonify({"error": e}), 500
 
 if __name__ == "__main__":
-    # 启动Flask应用
+    # Start Flask application
     app.run(host='0.0.0.0', port=5000, debug=False) 

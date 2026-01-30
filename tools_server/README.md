@@ -9,7 +9,7 @@ DeepResearcher原版的API调用逻辑过于复杂，这里提供一个简易版
 
 ## 架构
 ### 消费端：
-训练端（有gpu的AIstudio机器）启动train_grpo.sh/evaluate.sh，相应的配置实现在verl/trainer/config/ppo_trainer.yaml以及evaluate/train_grpo.sh脚本里
+训练端（有gpu的AIstudio机器）启动train.sh/evaluate.sh，相应的配置实现在verl/trainer/config/ppo_trainer.yaml以及train.sh脚本里
 
 ### 工作者端：
 在有网络的机器运行python tools_server/search_worker.py即可拉起搜索引擎+文字浏览器worker。
@@ -41,5 +41,5 @@ TODO
 2. 运行 `python tools_server/fs_server.py`，启动tools_server。
 3. 运行 `python tools_server/search_worker.py`，注册tool服务。
 4. 通过test.ipynb 启动agent单次运行demo测试
-5. 如果需要运行train_grpo.sh/evaluate.sh，还需要在训练端verl/trainer/config/ppo_trainer.yaml 配置osskey
+5. 如果需要运行train.sh/evaluate.sh，还需要在训练端verl/trainer/config/ppo_trainer.yaml 配置osskey
 

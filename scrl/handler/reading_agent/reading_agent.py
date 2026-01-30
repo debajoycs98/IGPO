@@ -107,7 +107,7 @@ class ReadingAgent:
             url_list: List[str],
             web_search_agent = None,
     ):
-        # 一定要有search_result_info_list 吗？似乎不需要有 search_query
+        # Is search_result_info_list required? Seems like search_query is not needed
         url_dict = {}
         for url in url_list:
             url_dict[url] = []

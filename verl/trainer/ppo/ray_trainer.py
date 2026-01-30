@@ -153,21 +153,10 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
     batch_size = data.batch.batch_size[0]
 
     if multi_turn:
-        # DEBUG: 检查 loss_mask 是否存在
         if "loss_mask" not in data.batch:
-            print(f"[DEBUG] loss_mask NOT in batch! Using attention_mask instead.")
-            print(f"[DEBUG] Available keys: {list(data.batch.keys())}")
             loss_mask = data.batch["attention_mask"]
         else:
             loss_mask = data.batch["loss_mask"]
-            # DEBUG: 打印 loss_mask 的统计信息（只打印一次）
-            if not hasattr(apply_kl_penalty, '_debug_printed'):
-                apply_kl_penalty._debug_printed = True
-                total_ones = (loss_mask == 1).sum().item()
-                total_zeros = (loss_mask == 0).sum().item()
-                print(f"[DEBUG] loss_mask shape: {loss_mask.shape}")
-                print(f"[DEBUG] loss_mask ones: {total_ones}, zeros: {total_zeros}")
-                print(f"[DEBUG] loss_mask[:3, :20]: {loss_mask[:3, :20]}")
         response_mask = loss_mask[:, -response_length:]
     else:
         attention_mask = data.batch["attention_mask"]
@@ -217,45 +206,15 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         data.batch["advantages"] = advantages
         data.batch["returns"] = returns
     elif adv_estimator == AdvantageEstimator.GRPO:
-    
-        # TODO 这里改了原来的index方式，需要检查
-        # TODO: test on more adv estimator type
         grpo_calculation_mask = data.batch["response_mask"]
         
-        # DEBUG: 打印 multi_turn 值和 batch keys（只打印一次）
-        if not hasattr(compute_advantage, '_entry_debug'):
-            compute_advantage._entry_debug = True
-            print(f"[DEBUG compute_advantage] multi_turn={multi_turn}")
-            print(f"[DEBUG compute_advantage] batch keys: {list(data.batch.keys())}")
-            print(f"[DEBUG compute_advantage] 'loss_mask' in batch: {'loss_mask' in data.batch}")
-        
         if multi_turn:
-            # If multi-turn, replace the mask with the relevant part of loss_mask
-            response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask
-            
-            # DEBUG: 检查 loss_mask 是否存在及其值
+            response_length = grpo_calculation_mask.size(1)
             if "loss_mask" not in data.batch:
-                print(f"[DEBUG compute_advantage] loss_mask NOT in batch!")
-                print(f"[DEBUG compute_advantage] Available keys: {list(data.batch.keys())}")
-                # 使用 attention_mask 作为 fallback
                 grpo_calculation_mask = data.batch["attention_mask"][:, -response_length:]
             else:
                 loss_mask = data.batch["loss_mask"]
-                # DEBUG: 打印 loss_mask 的统计信息（只打印一次）
-                if not hasattr(compute_advantage, '_debug_printed'):
-                    compute_advantage._debug_printed = True
-                    total_ones = (loss_mask == 1).sum().item()
-                    total_zeros = (loss_mask == 0).sum().item()
-                    total_elements = loss_mask.numel()
-                    print(f"[DEBUG compute_advantage] loss_mask shape: {loss_mask.shape}")
-                    print(f"[DEBUG compute_advantage] loss_mask: ones={total_ones} ({total_ones*100/total_elements:.1f}%), zeros={total_zeros} ({total_zeros*100/total_elements:.1f}%)")
-                    # 打印 response 部分的 loss_mask
-                    response_loss_mask = loss_mask[:, -response_length:]
-                    resp_ones = (response_loss_mask == 1).sum().item()
-                    resp_zeros = (response_loss_mask == 0).sum().item()
-                    resp_total = response_loss_mask.numel()
-                    print(f"[DEBUG compute_advantage] response_loss_mask: ones={resp_ones} ({resp_ones*100/resp_total:.1f}%), zeros={resp_zeros} ({resp_zeros*100/resp_total:.1f}%)")
-                grpo_calculation_mask = loss_mask[:, -response_length:]  # This mask is the one intended for GRPO
+                grpo_calculation_mask = loss_mask[:, -response_length:]
         # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
@@ -690,7 +649,7 @@ class RayPPOTrainer:
             num_gpus=self.config.trainer.n_gpus_per_node,
             data_writing_path=self.config.data.data_writing_path,
             model_name=self.config.actor_rollout_ref.model.path,
-            n=1, # 只roll一次
+            n=1,  # only roll once
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
             search_engine=self.config.search_engine,
@@ -709,10 +668,6 @@ class RayPPOTrainer:
             is_validation=True,
             client = self.client
         )
-        # val_types = ['f1','em','noformatf1']
-        # if self.config.reward_model.get('valid_reward_type',None) is not None:
-        #     val_types = self.config.reward_model.get('valid_reward_type',None).split('_')
-        # reward_tensor_dict = {vt: [] for vt in val_types}
         if not self.config.do_search:
             for test_data in self.val_dataloader:
                 test_batch = DataProto.from_single_dict(test_data)
@@ -806,7 +761,7 @@ class RayPPOTrainer:
                 }
                 with _timer('step', timing_raw):
                     with _timer('gen', timing_raw):
-                        # 每个 batch 重新初始化 ground_truths，避免累积导致数据错乱
+                        # Reinitialize ground_truths for each batch to avoid data corruption from accumulation
                         batch_ground_truths = [x.non_tensor_batch["reward_model"]["ground_truth"] for x in test_batch]
                         generation_manager.timing_raw = timing_raw
 
@@ -824,7 +779,7 @@ class RayPPOTrainer:
 
                         _, final_gen_batch_output, info_gain_rewards = generation_manager.run_llm_loop(
                             gen_batch=test_gen_batch,
-                            global_steps=-self.global_steps,# 取负号代表val
+                            global_steps=-self.global_steps,  # negative value indicates validation
                             ground_truths=batch_ground_truths
                         )
                     test_batch = test_batch[:len(final_gen_batch_output)]
@@ -855,27 +810,21 @@ class RayPPOTrainer:
 
                 data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
 
-        # 拼接 reward_tensor
-        # reward_tensor_cat = {
-        #     vt: torch.cat([rw.sum(-1) for rw in reward_tensor_dict[vt]], dim=0).cpu()
-        #     for vt in val_types
-        # }
         data_sources = np.concatenate(data_source_lst, axis=0)
-        # 汇总每个数据源的奖励
 		
         data_source_reward = {}
         for i in range(len(data_sources)):
             data_source = data_sources[i]
-            # 指标命名：f1 = noformatf1（无格式惩罚），f1_format_penalty = 原f1（有格式惩罚）
-            key_f1 = f"{data_source}_f1"  # 实际使用 noformatf1 的值
-            key_f1_format_penalty = f"{data_source}_f1_format_penalty"  # 实际使用 f1 的值
+            # Metric naming: f1 = noformatf1 (without format penalty), f1_format_penalty = original f1 (with format penalty)
+            key_f1 = f"{data_source}_f1"  # uses noformatf1 value
+            key_f1_format_penalty = f"{data_source}_f1_format_penalty"  # uses original f1 value
             key_em = f"{data_source}_em"
             if key_f1 not in data_source_reward:
                 data_source_reward[key_f1] = []
-            data_source_reward[key_f1].append(noformatf1_scores[i])  # f1 使用 noformatf1 的值
+            data_source_reward[key_f1].append(noformatf1_scores[i])  # f1 uses noformatf1 value
             if key_f1_format_penalty not in data_source_reward:
                 data_source_reward[key_f1_format_penalty] = []
-            data_source_reward[key_f1_format_penalty].append(f1_scores[i])  # f1_format_penalty 使用原 f1 的值
+            data_source_reward[key_f1_format_penalty].append(f1_scores[i])  # f1_format_penalty uses original f1 value
             if key_em not in data_source_reward:
                 data_source_reward[key_em] = []
             data_source_reward[key_em].append(em_scores[i])
@@ -1069,7 +1018,7 @@ class RayPPOTrainer:
             self.total_training_steps += self.global_steps
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
         
-        # 根据rollout判断数据offset
+        # Determine data offset based on rollout
         if self.config.data.get('start_with_rollout', False):
             rm_dir = self.config.reward_model.async_data_dir
             rollout_data_files = glob.glob(rm_dir + '/rollout_*')
@@ -1081,8 +1030,6 @@ class RayPPOTrainer:
                     self.wait_reward_step.append(int(step))
                     self.data_offset += len(uids)
                     self.global_steps = max(int(step), self.global_steps)
-#             self.train_dataloader.dataset.offset = self.data_offset
-#             print(self.train_dataloader.offset)
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens
@@ -1252,13 +1199,13 @@ class RayPPOTrainer:
                     # Please take care when you implement group based adv computation such as GRPO and rloo
                     if self.config.trainer.balance_batch:
                         reorder_idx = self._balance_batch(batch, metrics=metrics)
-                        # 同步重排 info_gain_rewards，确保索引与 batch 对应
+                        # Synchronously reorder info_gain_rewards to ensure indices match the batch
                         info_gain_rewards = [info_gain_rewards[i] for i in reorder_idx.tolist()]
                     
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
-                    # 计算rollout
+                    # Compute rollout
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     async_data_dir = self.config.reward_model.get("async_data_dir", None)
 
@@ -1272,7 +1219,7 @@ class RayPPOTrainer:
                             reward_tensor = self.rm_wg.compute_rm_score(batch)
                             batch = batch.union(reward_tensor)
                         
-                        # 原生使用ray异步计算rm，并没有实现异步采样和更新解耦，我们这里改成采样和更新解耦的延迟学习。
+                        # Original ray async RM computation doesn't decouple sampling and update; we change to delayed learning with decoupled sampling and update.
                         if self.config.reward_model.launch_reward_fn_async:
                             self.wait_reward_step.append(self.global_steps)
                             if self.config.data.custom_train_cls.name == 'AsycRMDataset':
@@ -1298,11 +1245,11 @@ class RayPPOTrainer:
                     if self.config.reward_model.launch_reward_fn_async:
                         assert async_data_dir is not None
                         ready_step = -1
-                        pprint(f"异步等待的batch:{self.wait_reward_step}")
+                        pprint(f"Async waiting batches: {self.wait_reward_step}")
                         for step in sorted(self.wait_reward_step):
                             rm_file = async_data_dir + f"/rm_{step}"
                             if not os.path.exists(rm_file):
-                                continue  # reward 还没打完
+                                continue  # reward not ready yet
                             ready_step = step
                             break
                         if ready_step == -1:
@@ -1344,10 +1291,8 @@ class RayPPOTrainer:
                             batch = batch.union(values)
 
                     with _timer("adv", timing_raw):
-                        # we combine with rule-based rm
                         reward_extra_infos_dict: dict[str, list]
                         if not self.config.reward_model.launch_reward_fn_async:
-#                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                             batch.batch["token_level_scores"] = reward_tensor
                             if reward_extra_infos_dict:
                                 batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
@@ -1362,22 +1307,22 @@ class RayPPOTrainer:
                         # compute advantages, executed on the driver process
 
                         norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)  # GRPO adv normalization factor
-                        info_gain_norm_mode = getattr(self.config.algorithm, 'info_gain_norm_mode', 'joint')  # "joint" 或 "separate"
+                        info_gain_norm_mode = getattr(self.config.algorithm, 'info_gain_norm_mode', 'joint')  # "joint" or "separate"
 
-                        # Curriculum Learning: 动态调整 F1 和 IG 权重
+                        # Curriculum Learning: dynamically adjust F1 and IG weights
                         use_curriculum = getattr(self.config.algorithm, 'use_curriculum', False)
                         if use_curriculum:
                             total_steps = self.config.trainer.total_epochs * len(self.train_dataloader)
                             progress = min(self.global_steps / max(total_steps, 1), 1.0)
-                            # 读取 curriculum 配置
+                            # Read curriculum config
                             f1_init = getattr(self.config.algorithm, 'curriculum_f1_init', 0.5)
                             f1_final = getattr(self.config.algorithm, 'curriculum_f1_final', 1.0)
                             ig_init = getattr(self.config.algorithm, 'curriculum_ig_init', 1.0)
                             ig_final = getattr(self.config.algorithm, 'curriculum_ig_final', 0.5)
-                            # 线性插值
+                            # Linear interpolation
                             curriculum_f1_weight = f1_init + (f1_final - f1_init) * progress
                             curriculum_ig_weight = ig_init + (ig_final - ig_init) * progress
-                            # 记录到 metrics
+                            # Log to metrics
                             metrics["curriculum/f1_weight"] = curriculum_f1_weight
                             metrics["curriculum/ig_weight"] = curriculum_ig_weight
                             metrics["curriculum/progress"] = progress

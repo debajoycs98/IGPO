@@ -282,7 +282,7 @@ class AsycRMDataset(RLHFDataset):
         self.config = config
         self._init_streaming_state()
         self._load_streaming_data()
-        self.poll_interval = 300 #每5分钟轮询一次
+        self.poll_interval = 300  # Poll every 5 minutes
         self.train_reward_type = train_reward_type
         self.reward_fn = reward_fn
         
@@ -295,7 +295,7 @@ class AsycRMDataset(RLHFDataset):
 
     def _init_streaming_state(self):
         from verl.utils.fs import copy_to_local
-        # 默认只支持第一个文件做流式 未来可支持oss
+        # Default only supports first file for streaming, future support for oss
         self.data_file = copy_to_local(self.data_files[0], cache_dir=self.cache_dir)
         self.last_file_timestamp = 0
         self.data_stream = []
@@ -303,7 +303,7 @@ class AsycRMDataset(RLHFDataset):
     def _load_streaming_data(self):
         file_timestamp = os.path.getmtime(self.data_file)
         if file_timestamp <= self.last_file_timestamp:
-            return  # 没有更新
+            return  # No update
         self.last_file_timestamp = file_timestamp
 
         self.dataset = datasets.load_dataset("parquet", data_files=self.data_file)["train"]
@@ -321,7 +321,7 @@ class AsycRMDataset(RLHFDataset):
     
     def __getitem__(self, item):
         waittime = 0
-        # 判断ddl
+        # Check deadline
         while item + self.offset < len(self.dataset) :
             row_dict = self.dataset[item + self.offset]
             today_str = datetime.date.today().strftime("%Y%m%d")
@@ -338,7 +338,7 @@ class AsycRMDataset(RLHFDataset):
             time.sleep(self.poll_interval)
             self._load_streaming_data()
             waittime += self.poll_interval
-            # 如果死循环，需要加入新的一个batch数据才能继续训练
+            # If stuck in loop, need to add new batch data to continue training
 
         row_dict = self.dataset[item + self.offset]
 
@@ -374,7 +374,7 @@ class AsycRMDataset(RLHFDataset):
             truncation=self.truncation,
         )
 
-        # 处理 position ids
+        # Process position ids
         if self.processor is not None and self.processor.image_processor.__class__.__name__ == "Qwen2VLImageProcessor":
             from verl.models.transformers.qwen2_vl import get_rope_index
             position_ids = [
@@ -416,11 +416,11 @@ class AsycRMDataset(RLHFDataset):
 
     
     def __len__(self):
-        return 1000000 # 无限大
+        return 1000000  # Infinite
     
     def _update_reward(self):
         def align_dp(batch):
-            # 找最大长度
+            # Find max length
             max_prompt_len = max(d.batch['prompts'].shape[1] for d in batch)
             max_resp_len = max(d.batch['responses'].shape[1] for d in batch)
 
@@ -435,22 +435,22 @@ class AsycRMDataset(RLHFDataset):
                 prompt_len = prompt.shape[1]
                 resp_len = response.shape[1]
 
-                # 左 pad prompts
+                # Left pad prompts
                 prompt_pad = torch.zeros((prompt.shape[0], max_prompt_len - prompt_len), dtype=prompt.dtype)
                 padded_prompt = torch.cat([prompt_pad + self.tokenizer.pad_token_id, prompt], dim=1)
 
-                # 右 pad responses
+                # Right pad responses
                 response_pad = torch.zeros((response.shape[0], max_resp_len - resp_len), dtype=response.dtype)
                 padded_response = torch.cat([response, response_pad + self.tokenizer.pad_token_id], dim=1)
 
-                # 构建新的 input_ids = [prompt | response]
+                # Build new input_ids = [prompt | response]
                 input_ids = torch.cat([padded_prompt, padded_response], dim=1)
 
-                # 构建 attention_mask（1的位置是有效 token）
+                # Build attention_mask (1 indicates valid token)
                 attn_mask = (input_ids != self.tokenizer.pad_token_id).long()
                 padded_rm = (padded_response != self.tokenizer.pad_token_id).long()
 
-                # 构建 position_ids（通常从0开始累加）
+                # Build position_ids (usually starts from 0 and increments)
                 position_ids = torch.cat([prompt_pad, position_ids, response_pad], dim=1)
 
                 if 'token_level_scores' in d.batch.keys():
@@ -467,7 +467,7 @@ class AsycRMDataset(RLHFDataset):
 
             return aligned_batch
             
-        # 通过prompt寻找label，然后计算reward
+            # Find label by prompt, then compute reward
         rm_dir = self.config.reward_model.async_data_dir
         while(True):
             rollout_data_files = glob.glob(rm_dir + '/rollout_*')
@@ -499,7 +499,7 @@ class AsycRMDataset(RLHFDataset):
                 index = 0
                 for prompt in rollout_datas.non_tensor_batch['raw_prompt'].tolist():
                     if prompt not in withrm_prompt:
-                        # 后面还可以做时间校验
+                        # Can also add time validation later
                         withoutrm_prompt[prompt] = withoutrm_prompt.get(prompt, [])
                         withoutrm_prompt[prompt].append(index)
                     index += 1
@@ -529,7 +529,7 @@ class AsycRMDataset(RLHFDataset):
                 continue
             rollout_datas = rollout_datas.select_idxs(np.array(select_idxs))  
             rollout_datas.non_tensor_batch["reward_model"] = np.array(ground_truths, dtype=object)
-            # 计算reward 
+            # Compute reward
             from verl.trainer.ppo.reward import compute_reward
             reward_tensor, reward_extra_infos_dict = compute_reward(rollout_datas, self.reward_fn, self.train_reward_type)
             rollout_datas.batch["token_level_scores"] = reward_tensor

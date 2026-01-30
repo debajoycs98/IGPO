@@ -72,7 +72,7 @@ class NaiveRewardManager:
 
             extra_info = data_item.non_tensor_batch.get("extra_info", None)
 
-            # info_gain_reward - 添加空值检查
+            # info_gain_reward - add null check
             info_gain_reward = info_gain_rewards[i] if info_gain_rewards is not None else []
 
             score = self.compute_score(
@@ -104,13 +104,13 @@ class NaiveRewardManager:
                 print("[response]", response_str)
                 print("[data_source]", data_source, "[ground_truth]", ground_truth)
                 if isinstance(score, dict):
-                    # 验证模式：score 是 dict
+                    # Validation mode: score is dict
                     for key, value in score.items():
-                        if key != 'scores':  # 跳过冗长的 token-level scores
+                        if key != 'scores':  # Skip verbose token-level scores
                             print(f"[{key}]", value)
                 else:
-                    # 训练模式：score 是 list (token-level rewards)
-                    # 只打印非零值的数量和最后一个值（通常是 F1 score）
+                    # Training mode: score is list (token-level rewards)
+                    # Only print non-zero count and last value (usually F1 score)
                     if isinstance(score, list) and len(score) > 0:
                         non_zero_count = sum(1 for s in score if s != 0)
                         last_value = score[-1] if score else 0
@@ -118,7 +118,7 @@ class NaiveRewardManager:
                     else:
                         print("[score]", score)
                 
-                # 打印 turn 数和 info_gain_reward（训练和验证都打印）
+                # Print turn count and info_gain_reward (for both training and validation)
                 if info_gain_reward:
                     num_turns = len(info_gain_reward) + 1
                     print(f"[turns]", num_turns)
