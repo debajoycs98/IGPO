@@ -521,6 +521,19 @@ class LLMGenerationManager:
                     print(f"[DEBUG step=0] ⚠️ MISMATCH: pseudo_resps_with_gt ({len(pseudo_resps_with_gt)}) != batch_size ({info_gain_rollings_active.batch['input_ids'].shape[0]})")
                 print(f"[DEBUG step=0] ================================================")
             
+            # DEBUG: Track specific samples before pseudo_generate_sequences
+            DEBUG_SAMPLES = [243, 251]
+            for debug_idx in DEBUG_SAMPLES:
+                if debug_idx in activate_list:
+                    pos_ids = info_gain_rollings_active.batch['position_ids'][debug_idx]
+                    input_ids = info_gain_rollings_active.batch['input_ids'][debug_idx]
+                    attn_mask = info_gain_rollings_active.batch['attention_mask'][debug_idx]
+                    valid_len = attn_mask.sum().item()
+                    print(f"[DEBUG INFO_GAIN_ACTIVE] step={step}, sample={debug_idx}, "
+                          f"input_ids.shape={input_ids.shape}, valid_len={valid_len}, "
+                          f"pos_ids[-10:]={pos_ids[-10:].tolist()}, "
+                          f"pos_ids[valid_len-5:valid_len]={pos_ids[max(0,int(valid_len)-5):int(valid_len)].tolist()}")
+            
             pseudo_gen_output = self.pseudo_generate_sequences(info_gain_rollings_active, pseudo_resps_with_gt)
 
             # Debug shape printing (enable with IGPO_DEBUG_SHAPES=true)
@@ -557,6 +570,24 @@ class LLMGenerationManager:
                     # Compute log_probs using original mode (immediate computation)
                     verify_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
                     info_gain_type = self.config.info_gain_type
+                    
+                    # DEBUG: Track specific samples that have mismatches (243, 251)
+                    DEBUG_SAMPLES = [243, 251]
+                    for debug_idx in DEBUG_SAMPLES:
+                        if debug_idx in activate_list:
+                            gt_range = gt_idx[debug_idx]
+                            if gt_range[0] < gt_range[1]:
+                                debug_log_probs = verify_log_probs.batch['old_log_probs'][debug_idx, gt_range[0]:gt_range[1]]
+                                debug_mean = debug_log_probs.mean().item()
+                                print(f"[DEBUG ORIG] step={step}, sample={debug_idx}, in_activate_list=True, "
+                                      f"gt_range={gt_range}, log_probs.mean={debug_mean:.6f}")
+                                # Print position_ids and input_ids info for this sample
+                                pos_ids = pseudo_gen_output.batch['position_ids'][debug_idx]
+                                input_ids = pseudo_gen_output.batch['input_ids'][debug_idx]
+                                print(f"[DEBUG ORIG] step={step}, sample={debug_idx}, "
+                                      f"input_ids.shape={input_ids.shape}, pos_ids[-10:]={pos_ids[-10:].tolist()}")
+                        else:
+                            print(f"[DEBUG ORIG] step={step}, sample={debug_idx}, in_activate_list=False")
                     
                     # DEBUG: Print original mode info for first turn
                     if step < 2 and len(activate_list) > 0:
@@ -919,6 +950,10 @@ class LLMGenerationManager:
                 for bs in turn_batch_sizes:
                     turn_boundaries.append(turn_boundaries[-1] + bs)
                 
+                # DEBUG: Track specific samples
+                DEBUG_SAMPLES = [243, 251]
+                debug_vec_log_probs = {s: {} for s in DEBUG_SAMPLES}  # {sample_idx: {turn_idx: mean_log_prob}}
+                
                 for turn_idx in range(num_turns_collected):
                     start_idx = turn_boundaries[turn_idx]
                     end_idx = turn_boundaries[turn_idx + 1]
@@ -928,6 +963,25 @@ class LLMGenerationManager:
                     # Note: merged_old_log_probs has shape [total_samples, max_response_len]
                     turn_old_log_probs = merged_old_log_probs[start_idx:end_idx]
                     turn_entropys = merged_entropys[start_idx:end_idx]
+                    
+                    # DEBUG: Track specific samples (243, 251)
+                    for debug_idx in DEBUG_SAMPLES:
+                        if debug_idx in activate_list_for_turn:
+                            gt_range = gt_idx[debug_idx]
+                            if gt_range[0] < gt_range[1]:
+                                debug_log_probs = turn_old_log_probs[debug_idx, gt_range[0]:gt_range[1]]
+                                debug_mean = debug_log_probs.mean().item()
+                                debug_vec_log_probs[debug_idx][turn_idx] = debug_mean
+                                print(f"[DEBUG VEC] turn_idx={turn_idx}, sample={debug_idx}, in_activate_list=True, "
+                                      f"gt_range={gt_range}, log_probs.mean={debug_mean:.6f}")
+                                # Print position_ids info from stored pseudo_output
+                                stored_output = vectorized_data_collector['pseudo_outputs_per_turn'][turn_idx]
+                                pos_ids = stored_output.batch['position_ids'][debug_idx]
+                                input_ids = stored_output.batch['input_ids'][debug_idx]
+                                print(f"[DEBUG VEC] turn_idx={turn_idx}, sample={debug_idx}, "
+                                      f"input_ids.shape={input_ids.shape}, pos_ids[-10:]={pos_ids[-10:].tolist()}")
+                        else:
+                            print(f"[DEBUG VEC] turn_idx={turn_idx}, sample={debug_idx}, in_activate_list=False")
                     
                     # DEBUG: Print turn info
                     if turn_idx < 2:
