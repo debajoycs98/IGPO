@@ -890,15 +890,30 @@ class LLMGenerationManager:
                     turn_old_log_probs = merged_log_probs.batch['old_log_probs'][start_idx:end_idx]
                     turn_entropys = merged_log_probs.batch['entropys'][start_idx:end_idx]
                     
+                    # DEBUG: Print turn info
+                    if turn_idx < 2:
+                        print(f"[DEBUG VEC] turn_idx={turn_idx}, start_idx={start_idx}, end_idx={end_idx}")
+                        print(f"[DEBUG VEC] turn_old_log_probs.shape={turn_old_log_probs.shape}")
+                        print(f"[DEBUG VEC] activate_list_for_turn length={len(activate_list_for_turn)}")
+                        print(f"[DEBUG VEC] activate_list_for_turn[:5]={activate_list_for_turn[:5]}")
+                        # Check first sample's log_probs
+                        if len(activate_list_for_turn) > 0:
+                            first_global_idx = activate_list_for_turn[0]
+                            first_gt_range = gt_idx[first_global_idx]
+                            print(f"[DEBUG VEC] first sample global_idx={first_global_idx}, gt_range={first_gt_range}")
+                            if first_gt_range[0] < first_gt_range[1]:
+                                first_log_probs = turn_old_log_probs[0, first_gt_range[0]:first_gt_range[1]]
+                                print(f"[DEBUG VEC] first sample log_probs.shape={first_log_probs.shape}, mean={first_log_probs.mean().item():.6f}")
+                    
                     if turn_idx == 0:
                         # First turn: initialize gt_values
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
                             # Check if gt_idx range is valid
                             if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
                                 continue
-                            # CRITICAL FIX: Use local_idx (not global_idx) because turn_old_log_probs only contains 
-                            # active samples for this turn, with shape [len(activate_list_for_turn), response_len]
-                            log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
+                            # NOTE: Use global_idx because info_gain_rollings_active preserves original batch size N,
+                            # so turn_old_log_probs has shape [N, response_len], not [len(activate_list), response_len]
+                            log_probs = turn_old_log_probs[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
                             
                             # Skip if mean_log_prob is nan or inf
@@ -911,7 +926,7 @@ class LLMGenerationManager:
                                 gt_values[global_idx] = torch.exp(torch.tensor(mean_log_prob)).item()
                             
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
-                            gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
+                            gt_entropys_per_turn[global_idx].append(turn_entropys[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
                     else:
                         # Subsequent turns: compute info_gain
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
@@ -921,9 +936,9 @@ class LLMGenerationManager:
                             # Check if gt_values was initialized in turn 0, skip if not to avoid KeyError/nan
                             if global_idx not in gt_values:
                                 continue
-                            # CRITICAL FIX: Use local_idx (not global_idx) because turn_old_log_probs only contains 
-                            # active samples for this turn, with shape [len(activate_list_for_turn), response_len]
-                            log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
+                            # NOTE: Use global_idx because info_gain_rollings_active preserves original batch size N,
+                            # so turn_old_log_probs has shape [N, response_len], not [len(activate_list), response_len]
+                            log_probs = turn_old_log_probs[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
                             
                             # Check for nan in mean_log_prob
@@ -945,8 +960,8 @@ class LLMGenerationManager:
                             gt_values[global_idx] = cur_value
                             
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
-                            # CRITICAL FIX: Use local_idx for turn_entropys indexing
-                            gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
+                            # NOTE: Use global_idx for turn_entropys indexing (same reason as turn_old_log_probs)
+                            gt_entropys_per_turn[global_idx].append(turn_entropys[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
         
                 # Statistics and print results
                 total_info_gains = sum(len(r) for r in info_gain_rewards)
