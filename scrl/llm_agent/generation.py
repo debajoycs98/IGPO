@@ -19,6 +19,12 @@ DEBUG_SHAPES = os.environ.get('IGPO_DEBUG_SHAPES', '').lower() in ('true', '1', 
 if DEBUG_SHAPES:
     print("[IGPO] Debug mode enabled: tensor shape printing is ON (IGPO_DEBUG_SHAPES=true)")
 
+# Verification flag: when enabled, compute both vectorized and original mode, then compare
+# Set IGPO_VERIFY_VECTORIZED=true to enable
+VERIFY_VECTORIZED = os.environ.get('IGPO_VERIFY_VECTORIZED', '').lower() in ('true', '1', 'yes')
+if VERIFY_VECTORIZED:
+    print("[IGPO] Verification mode enabled: will compare vectorized vs original results (IGPO_VERIFY_VECTORIZED=true)")
+
 # Import vectorized GT logprob module
 from scrl.llm_agent.vectorized_gt_logprob import (
     is_vectorized_enabled,
@@ -284,6 +290,9 @@ class LLMGenerationManager:
 
 
         node_rank = int(os.environ["PET_NODE_RANK"])
+        # Debug: print global_steps to identify if this is initial validation (step=0) or training
+        is_validation = global_steps <= 0
+        print(f"[DEBUG] run_llm_loop: global_steps={global_steps}, is_validation={is_validation}")
         print(f"node {node_rank} gains {len(gen_batch.batch['input_ids'])} * {self.config.n} datas!",flush=True)
         query_contents = self.parse_question(gen_batch.batch['input_ids'])
         messages_list = []
@@ -393,6 +402,10 @@ class LLMGenerationManager:
         # ========== Vectorized computation: data collection structure ==========
         # When vectorization is enabled, delay GT log probs computation for batch processing after loop
         vectorized_data_collector = None
+        # For verification: also compute original mode results when VERIFY_VECTORIZED is enabled
+        original_mode_gt_values = {} if (use_vectorized_gt_logprob and VERIFY_VECTORIZED) else None
+        original_mode_info_gains = [[] for _ in range(len(messages_list))] if (use_vectorized_gt_logprob and VERIFY_VECTORIZED) else None
+        
         if use_vectorized_gt_logprob:
             vectorized_data_collector = {
                 'pseudo_outputs_per_turn': [],  # List of pseudo_gen_output for each turn
@@ -401,6 +414,8 @@ class LLMGenerationManager:
                 'num_samples': len(messages_list),
             }
             print(f"[IGPO] Vectorized GT LogProb: Collecting data for batch computation...")
+            if VERIFY_VECTORIZED:
+                print(f"[IGPO] Verification mode: will also compute original mode for comparison")
 
         for step in range(self.config.max_turns):
             print(f"node {node_rank} step {step} start!")
@@ -514,6 +529,45 @@ class LLMGenerationManager:
                 })
                 vectorized_data_collector['pseudo_outputs_per_turn'].append(pseudo_output_clone)
                 vectorized_data_collector['activate_lists_per_turn'].append(list(activate_list))
+                
+                # ========== Verification: also compute original mode for comparison ==========
+                if VERIFY_VECTORIZED and original_mode_gt_values is not None:
+                    # Compute log_probs using original mode (immediate computation)
+                    verify_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
+                    info_gain_type = self.config.info_gain_type
+                    
+                    if step == 0:
+                        for i in activate_list:
+                            if gt_idx[i][0] >= gt_idx[i][1]:
+                                continue
+                            log_probs = verify_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
+                            mean_log_prob = log_probs.mean().item()
+                            if math.isnan(mean_log_prob) or math.isinf(mean_log_prob):
+                                continue
+                            if info_gain_type == "log_prob_diff":
+                                original_mode_gt_values[i] = mean_log_prob
+                            else:
+                                original_mode_gt_values[i] = torch.exp(torch.tensor(mean_log_prob)).item()
+                    else:
+                        for i in activate_list:
+                            if gt_idx[i][0] >= gt_idx[i][1]:
+                                continue
+                            if i not in original_mode_gt_values:
+                                continue
+                            log_probs = verify_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
+                            mean_log_prob = log_probs.mean().item()
+                            if math.isnan(mean_log_prob):
+                                continue
+                            if info_gain_type == "log_prob_diff":
+                                cur_value = mean_log_prob
+                                info_gain = cur_value - original_mode_gt_values[i]
+                            else:
+                                cur_value = torch.exp(torch.tensor(mean_log_prob)).item()
+                                info_gain = cur_value - original_mode_gt_values[i]
+                            if math.isnan(info_gain) or math.isinf(info_gain):
+                                continue
+                            original_mode_info_gains[i].append(info_gain)
+                            original_mode_gt_values[i] = cur_value
             else:
                 # Original mode: immediate computation
                 pseudo_gen_output_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
@@ -525,13 +579,31 @@ class LLMGenerationManager:
                 info_gain_type = self.config.info_gain_type  # "prob_diff" or "log_prob_diff"
                 
                 if step == 0:
+                    # Debug: print old_log_probs shape at step 0 (first sample only)
+                    if len(activate_list) > 0:
+                        sample_idx = activate_list[0]
+                        old_log_probs_shape = pseudo_gen_output_log_probs.batch['old_log_probs'].shape
+                        print(f"[DEBUG step=0] old_log_probs shape: {old_log_probs_shape}, gt_idx[{sample_idx}]: {gt_idx[sample_idx]}")
+                    
                     for i in activate_list:
                         # Check if gt_idx range is valid
                         if gt_idx[i][0] >= gt_idx[i][1]:
                             # Empty range, skip (keep gt_values[i] at initial value)
                             continue
                         log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
+                        
+                        # Debug: print first sample's log_probs details
+                        if i == activate_list[0]:
+                            print(f"[DEBUG step=0] log_probs shape: {log_probs.shape}, numel: {log_probs.numel()}")
+                            if log_probs.numel() > 0:
+                                print(f"[DEBUG step=0] log_probs min: {log_probs.min().item():.4f}, max: {log_probs.max().item():.4f}, has_nan: {torch.isnan(log_probs).any().item()}")
+                        
                         mean_log_prob = log_probs.mean().item()
+                        
+                        # Skip if mean_log_prob is nan or inf
+                        if math.isnan(mean_log_prob) or math.isinf(mean_log_prob):
+                            print(f"[DEBUG step=0] Skipping sample {i}: mean_log_prob is nan/inf ({mean_log_prob})")
+                            continue
                         
                         if info_gain_type == "log_prob_diff":
                             # Store mean of log probabilities
@@ -548,8 +620,15 @@ class LLMGenerationManager:
                         if gt_idx[i][0] >= gt_idx[i][1]:
                             # Empty range, skip (don't compute info_gain)
                             continue
+                        # Check if gt_values was initialized in step 0, skip if not to avoid KeyError/nan
+                        if i not in gt_values:
+                            continue
                         log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
                         mean_log_prob = log_probs.mean().item()
+                        
+                        # Check for nan in mean_log_prob
+                        if math.isnan(mean_log_prob):
+                            continue
                         
                         prev_value = gt_values[i]  # Save previous value for verification
                         
@@ -561,6 +640,10 @@ class LLMGenerationManager:
                             # Use probability difference
                             cur_value = torch.exp(torch.tensor(mean_log_prob)).item()
                             info_gain = cur_value - gt_values[i]
+                        
+                        # Check for nan/inf in info_gain
+                        if math.isnan(info_gain) or math.isinf(info_gain):
+                            continue
                         
                         info_gain_rewards[i].append(info_gain)
                         gt_values[i] = cur_value
@@ -749,8 +832,13 @@ class LLMGenerationManager:
                             # Check if gt_idx range is valid
                             if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
                                 continue
-                            log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
+                            # NOTE: Use global_idx (not local_idx) because turn_old_log_probs contains ALL samples
+                            log_probs = turn_old_log_probs[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
+                            
+                            # Skip if mean_log_prob is nan or inf
+                            if math.isnan(mean_log_prob) or math.isinf(mean_log_prob):
+                                continue
                             
                             if info_gain_type == "log_prob_diff":
                                 gt_values[global_idx] = mean_log_prob
@@ -758,15 +846,23 @@ class LLMGenerationManager:
                                 gt_values[global_idx] = torch.exp(torch.tensor(mean_log_prob)).item()
                             
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
-                            gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
+                            gt_entropys_per_turn[global_idx].append(turn_entropys[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
                     else:
                         # Subsequent turns: compute info_gain
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
                             # Check if gt_idx range is valid
                             if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
                                 continue
-                            log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
+                            # Check if gt_values was initialized in turn 0, skip if not to avoid KeyError/nan
+                            if global_idx not in gt_values:
+                                continue
+                            # NOTE: Use global_idx (not local_idx) because turn_old_log_probs contains ALL samples
+                            log_probs = turn_old_log_probs[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
+                            
+                            # Check for nan in mean_log_prob
+                            if math.isnan(mean_log_prob):
+                                continue
                             
                             if info_gain_type == "log_prob_diff":
                                 cur_value = mean_log_prob
@@ -775,11 +871,15 @@ class LLMGenerationManager:
                                 cur_value = torch.exp(torch.tensor(mean_log_prob)).item()
                                 info_gain = cur_value - gt_values[global_idx]
                             
+                            # Check for nan/inf in info_gain
+                            if math.isnan(info_gain) or math.isinf(info_gain):
+                                continue
+                            
                             info_gain_rewards[global_idx].append(info_gain)
                             gt_values[global_idx] = cur_value
                             
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
-                            gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
+                            gt_entropys_per_turn[global_idx].append(turn_entropys[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
         
                 # Statistics and print results
                 total_info_gains = sum(len(r) for r in info_gain_rewards)
@@ -787,6 +887,49 @@ class LLMGenerationManager:
                       f"{num_turns_collected} turns, "
                       f"{merged_input_ids.shape[0]} total samples processed, "
                       f"{total_info_gains} info_gain values computed")
+                
+                # ========== Verification: compare vectorized vs original mode ==========
+                if VERIFY_VECTORIZED and original_mode_info_gains is not None:
+                    print(f"\n[VERIFY] ========== Comparing Vectorized vs Original Mode ==========")
+                    mismatch_count = 0
+                    match_count = 0
+                    total_compared = 0
+                    max_abs_diff = 0.0
+                    
+                    for sample_idx in range(len(messages_list)):
+                        vec_gains = info_gain_rewards[sample_idx]
+                        orig_gains = original_mode_info_gains[sample_idx]
+                        
+                        if len(vec_gains) != len(orig_gains):
+                            print(f"[VERIFY] Sample {sample_idx}: LENGTH MISMATCH! vectorized={len(vec_gains)}, original={len(orig_gains)}")
+                            mismatch_count += 1
+                            continue
+                        
+                        for turn_idx, (v, o) in enumerate(zip(vec_gains, orig_gains)):
+                            total_compared += 1
+                            abs_diff = abs(v - o)
+                            max_abs_diff = max(max_abs_diff, abs_diff)
+                            
+                            # Check if values are close (tolerance for floating point)
+                            if abs_diff > 1e-5:
+                                print(f"[VERIFY] Sample {sample_idx}, Turn {turn_idx}: MISMATCH! "
+                                      f"vectorized={v:.8f}, original={o:.8f}, diff={abs_diff:.8e}")
+                                mismatch_count += 1
+                            else:
+                                match_count += 1
+                    
+                    print(f"[VERIFY] ========== Summary ==========")
+                    print(f"[VERIFY] Total values compared: {total_compared}")
+                    print(f"[VERIFY] Matches (diff < 1e-5): {match_count}")
+                    print(f"[VERIFY] Mismatches: {mismatch_count}")
+                    print(f"[VERIFY] Max absolute difference: {max_abs_diff:.8e}")
+                    if mismatch_count == 0 and total_compared > 0:
+                        print(f"[VERIFY] ✓ PASSED: Vectorized mode is numerically equivalent to original mode!")
+                    elif total_compared == 0:
+                        print(f"[VERIFY] ⚠ WARNING: No values to compare (no info_gains computed)")
+                    else:
+                        print(f"[VERIFY] ✗ FAILED: Found {mismatch_count} mismatches!")
+                    print(f"[VERIFY] ====================================\n")
             else:
                 print(f"[IGPO] Vectorized GT LogProb: No turns collected (all samples may have finished early)")
         
@@ -797,7 +940,9 @@ class LLMGenerationManager:
 
         if activate_list != []:
             for i in activate_list:
-                message_string_list[i] = self.tokenizer.apply_chat_template(messages_list[i], add_generation_prompt=True, tokenize=False)
+                # Use add_generation_prompt=False to avoid adding an extra separator at the end,
+                # which would cause turn mismatch in info_gain.py
+                message_string_list[i] = self.tokenizer.apply_chat_template(messages_list[i], add_generation_prompt=False, tokenize=False)
         
         response_str_list = []
         initial_prompt_list = []
