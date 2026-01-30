@@ -268,7 +268,16 @@ class LLMGenerationManager:
         delta_position_id = torch.arange(1, response_length + 1, device=position_ids.device)
         delta_position_id = delta_position_id.unsqueeze(0).expand(batch_size, -1)
 
-        response_position_ids = position_ids[..., -1:] + delta_position_id
+        # FIX: Get the last VALID position_id for each sample (not just the last element of the tensor)
+        # This is important because info_gain_rollings_active may have stale values beyond valid_len
+        # 
+        # Problem: position_ids[..., -1:] takes the last element of the tensor, which might be stale
+        # Solution: Use attention_mask to find the actual last valid position for each sample
+        valid_lengths = attention_mask.sum(dim=1, keepdim=True).long()  # [batch_size, 1]
+        # Clamp to valid range and get the position_id at (valid_length - 1)
+        last_valid_indices = (valid_lengths - 1).clamp(min=0)  # [batch_size, 1]
+        last_valid_pos_ids = torch.gather(position_ids, dim=1, index=last_valid_indices)  # [batch_size, 1]
+        response_position_ids = last_valid_pos_ids + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
         response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
