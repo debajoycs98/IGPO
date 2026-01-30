@@ -807,24 +807,34 @@ class LLMGenerationManager:
                 info_gain_type = self.config.info_gain_type
                 all_log_probs_results = []
                 
-                # Strategy: Use LEFT PADDING to merge all turns into one batch, call compute_log_prob ONCE
-                # Key insight: compute_log_prob slices logits from the END (logits[:, -response_length-1:-1])
-                # By using left padding, we ensure all samples have their response at the end of input_ids
+                # Strategy: Reconstruct input_ids so ALL samples have response of length max_response_len
                 # 
-                # Before (right padding - WRONG):
-                #   Turn 0: [prompt][response][PAD...]  → response NOT at end
-                #   Turn 1: [prompt][response][PAD...]  → response NOT at end
+                # Problem: Different turns have different response lengths. compute_log_prob uses:
+                #   response_length = responses.size(1)  # = max_response_len after padding
+                #   logits = output[:, -response_length-1:-1]  # slices last response_length logits
                 # 
-                # After (left padding - CORRECT):
-                #   Turn 0: [PAD...][prompt][response]  → response at end ✓
-                #   Turn 1: [PAD...][prompt][response]  → response at end ✓
+                # If we only left-pad input_ids without restructuring:
+                #   Turn 0 (resp_len=200): [PAD...][prompt][resp_200] → slice [-2001:-1] gets prompt! ✗
+                #   Turn 3 (resp_len=800): [PAD...][prompt][resp_800] → slice [-2001:-1] gets prompt! ✗
+                # 
+                # Solution: Reconstruct input_ids to have uniform response length:
+                #   1. Extract prompt = input_ids[:, :-original_resp_len]
+                #   2. Extract response = input_ids[:, -original_resp_len:]
+                #   3. Pad response to max_response_len (right padding)
+                #   4. Rebuild input_ids = [prompt][response_padded]
+                #   5. Then left-pad the whole input_ids to max_seq_len
+                # 
+                # After restructuring:
+                #   Turn 0: [PAD...][prompt][resp_200][PAD_to_2000] → slice [-2001:-1] gets exactly response ✓
+                #   Turn 3: [PAD...][prompt][resp_800][PAD_to_2000] → slice [-2001:-1] gets exactly response ✓
                 
                 gt_idx = vectorized_data_collector['gt_idx']
                 
-                # Collect all turns' data
+                # Step 1: Collect all turns' data and find max_response_len
                 all_input_ids = []
                 all_attention_mask = []
                 all_responses = []
+                all_prompts = []
                 turn_batch_sizes = []
                 turn_response_lengths = []
                 
@@ -834,54 +844,79 @@ class LLMGenerationManager:
                     all_input_ids.append(pseudo_output.batch['input_ids'])
                     all_attention_mask.append(pseudo_output.batch['attention_mask'])
                     all_responses.append(pseudo_output.batch['responses'])
+                    all_prompts.append(pseudo_output.batch['prompts'])
                     turn_response_lengths.append(pseudo_output.batch['responses'].shape[1])
                 
-                # Find max lengths
-                max_seq_len = max(t.shape[1] for t in all_input_ids)
-                max_response_len = max(t.shape[1] for t in all_responses)
+                max_response_len = max(turn_response_lengths)
                 
-                # Apply LEFT padding to input_ids and attention_mask
-                # Apply RIGHT padding to responses (to keep gt_idx correct)
-                padded_input_ids = []
-                padded_attention_mask = []
-                padded_responses = []
+                # Step 2: Reconstruct input_ids with uniform response length
+                reconstructed_input_ids = []
+                reconstructed_attention_mask = []
+                reconstructed_responses = []
                 
                 for i in range(len(all_input_ids)):
-                    curr_seq_len = all_input_ids[i].shape[1]
-                    curr_resp_len = all_responses[i].shape[1]
+                    curr_input_ids = all_input_ids[i]
+                    curr_attention_mask = all_attention_mask[i]
+                    curr_responses = all_responses[i]
+                    curr_prompts = all_prompts[i]
+                    curr_resp_len = turn_response_lengths[i]
                     
-                    # LEFT padding for input_ids: pad at the beginning (left side)
-                    left_pad_len = max_seq_len - curr_seq_len
-                    if left_pad_len > 0:
-                        # F.pad format: (left, right) for 2D tensor's last dim
-                        padded_input_ids.append(F.pad(all_input_ids[i], (left_pad_len, 0), value=self.tokenizer.pad_token_id))
-                        padded_attention_mask.append(F.pad(all_attention_mask[i], (left_pad_len, 0), value=0))
-                    else:
-                        padded_input_ids.append(all_input_ids[i])
-                        padded_attention_mask.append(all_attention_mask[i])
+                    # Calculate how much response padding is needed
+                    resp_pad_len = max_response_len - curr_resp_len
                     
-                    # RIGHT padding for responses: pad at the end (right side)
-                    # This keeps gt_idx positions correct since actual content is at the beginning
-                    right_pad_len = max_response_len - curr_resp_len
-                    if right_pad_len > 0:
-                        padded_responses.append(F.pad(all_responses[i], (0, right_pad_len), value=self.tokenizer.pad_token_id))
+                    if resp_pad_len > 0:
+                        # Pad response to max_response_len (right padding)
+                        padded_responses = F.pad(curr_responses, (0, resp_pad_len), value=self.tokenizer.pad_token_id)
+                        
+                        # Reconstruct input_ids: [prompt][response_padded]
+                        # The prompt part is input_ids[:, :-curr_resp_len]
+                        # We rebuild by concatenating prompt + padded_response
+                        prompt_part = curr_input_ids[:, :-curr_resp_len]
+                        new_input_ids = torch.cat([prompt_part, padded_responses], dim=1)
+                        
+                        # Reconstruct attention_mask similarly
+                        prompt_attn = curr_attention_mask[:, :-curr_resp_len]
+                        # Response padding should have attention_mask = 0
+                        padded_resp_attn = F.pad(curr_attention_mask[:, -curr_resp_len:], (0, resp_pad_len), value=0)
+                        new_attention_mask = torch.cat([prompt_attn, padded_resp_attn], dim=1)
+                        
+                        reconstructed_input_ids.append(new_input_ids)
+                        reconstructed_attention_mask.append(new_attention_mask)
+                        reconstructed_responses.append(padded_responses)
                     else:
-                        padded_responses.append(all_responses[i])
+                        # No padding needed, use original
+                        reconstructed_input_ids.append(curr_input_ids)
+                        reconstructed_attention_mask.append(curr_attention_mask)
+                        reconstructed_responses.append(curr_responses)
                 
-                # Merge into one large batch
+                # Step 3: Find max_seq_len (after response reconstruction)
+                max_seq_len = max(t.shape[1] for t in reconstructed_input_ids)
+                
+                # Step 4: Apply LEFT padding to input_ids and attention_mask
+                padded_input_ids = []
+                padded_attention_mask = []
+                
+                for i in range(len(reconstructed_input_ids)):
+                    curr_seq_len = reconstructed_input_ids[i].shape[1]
+                    left_pad_len = max_seq_len - curr_seq_len
+                    
+                    if left_pad_len > 0:
+                        padded_input_ids.append(F.pad(reconstructed_input_ids[i], (left_pad_len, 0), value=self.tokenizer.pad_token_id))
+                        padded_attention_mask.append(F.pad(reconstructed_attention_mask[i], (left_pad_len, 0), value=0))
+                    else:
+                        padded_input_ids.append(reconstructed_input_ids[i])
+                        padded_attention_mask.append(reconstructed_attention_mask[i])
+                
+                # Step 5: Merge into one large batch
                 merged_input_ids = torch.cat(padded_input_ids, dim=0)
                 merged_attention_mask = torch.cat(padded_attention_mask, dim=0)
-                merged_responses = torch.cat(padded_responses, dim=0)
+                merged_responses = torch.cat(reconstructed_responses, dim=0)
                 
-                # Recompute position_ids based on the new attention_mask (left-padded)
-                # position_ids should be cumsum of attention_mask - 1, with 0 for pad positions
+                # Recompute position_ids based on attention_mask
                 merged_position_ids = merged_attention_mask.cumsum(dim=1) - 1
-                merged_position_ids = merged_position_ids.clamp(min=0)  # Ensure non-negative
+                merged_position_ids = merged_position_ids.clamp(min=0)
                 
-                # For prompts, we use left padding as well
-                # But compute_log_prob may not use prompts directly, so we can derive it
-                # prompts = input_ids[:, :-response_length] after padding adjustments
-                # For simplicity, we compute prompts from input_ids and response_length
+                # Compute prompts (everything except the last max_response_len tokens)
                 prompt_len = max_seq_len - max_response_len
                 merged_prompts = merged_input_ids[:, :prompt_len]
                 
@@ -894,7 +929,8 @@ class LLMGenerationManager:
                 })
                 
                 total_samples = merged_input_ids.shape[0]
-                print(f"[IGPO] Vectorized (LEFT PADDING): Merged {num_turns_collected} turns into batch size = {total_samples}, seq_len = {max_seq_len}, resp_len = {max_response_len}")
+                print(f"[IGPO] Vectorized (RESTRUCTURED): Merged {num_turns_collected} turns, batch={total_samples}, seq_len={max_seq_len}, resp_len={max_response_len}")
+                print(f"[IGPO] Turn response lengths: {turn_response_lengths}")
                 
                 # Call compute_log_prob ONCE for all turns
                 merged_log_probs = self.actor_rollout_wg.compute_log_prob(merged_batch)
