@@ -271,8 +271,11 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
     
     chats_size = len(turn_start_positions)
     
-    # ========== 完整验证：记录 Turn 边界 ==========
+    # ========== 验证模式：严格检查或完整检查 ==========
+    strict_check = _HAS_STRICT_CHECK and is_strict_check_enabled()
     full_check = _HAS_FULL_CHECK and is_full_check_enabled()
+    any_check = strict_check or full_check
+    
     if full_check:
         checker = get_full_checker()
         sample_idx = getattr(compute_score, '_sample_counter', 0)
@@ -307,7 +310,8 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         scores[-1] = alpha * f1_score
         
         # 即使没有 info_gain，也需要记录验证数据
-        if full_check:
+        if any_check:
+            sample_idx = getattr(compute_score, '_sample_counter', 0)
             compute_score._sample_counter = sample_idx + 1
             record_info_gain_assignment(
                 sample_idx=sample_idx,
@@ -328,7 +332,8 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         scores[-1] = alpha * f1_score
         
         # 即使 turn mismatch，也需要记录验证数据
-        if full_check:
+        if any_check:
+            sample_idx = getattr(compute_score, '_sample_counter', 0)
             compute_score._sample_counter = sample_idx + 1
             record_info_gain_assignment(
                 sample_idx=sample_idx,
@@ -426,7 +431,6 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         print(f"    Match: {nonzero_count == chats_size} {'✓' if nonzero_count == chats_size else '⚠️ MISMATCH!'}")
     
     # ========== 严格验证：记录分配信息 ==========
-    strict_check = _HAS_STRICT_CHECK and is_strict_check_enabled()
     if strict_check:
         # 从 reward_assignments 中提取信息
         ig_rewards = []
