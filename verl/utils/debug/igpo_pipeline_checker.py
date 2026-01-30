@@ -364,7 +364,11 @@ def verify_reward_transmission(sample_idx: int) -> CheckResult:
         )
     
     # 验证位置
-    expected_positions = ig_positions + [f1_position] if f1_position >= 0 else ig_positions
+    # 注意：只有当 F1 score != 0 时，F1 position 才会在 core_algos 中出现
+    expected_positions = ig_positions.copy()
+    if f1_position >= 0 and f1_score != 0:
+        expected_positions.append(f1_position)
+    
     if set(core_positions) != set(expected_positions):
         return CheckResult(
             check_name="Check 3: Reward Transmission",
@@ -523,14 +527,24 @@ def verify_normalization(mode: str, norm_by_std: bool) -> CheckResult:
 def record_turn_level_results(
     sample_idx: int,
     turn_data: List[Tuple[int, float]],  # [(pos, advantage), ...]
-    discounted_returns: torch.Tensor,
+    discounted_returns: Optional[torch.Tensor] = None,
 ):
-    """记录 turn-level 累积结果"""
+    """记录 turn-level 累积结果
+    
+    Args:
+        sample_idx: 样本索引，-1 表示记录最终的 discounted_returns
+        turn_data: turn 数据列表（当 sample_idx >= 0 时）
+        discounted_returns: 完整的 discounted_returns 张量（当 sample_idx == -1 时）
+    """
     if not is_strict_check_enabled():
         return
     
-    _checkpoint.turn_advantages[sample_idx] = turn_data.copy()
-    if _checkpoint.discounted_returns is None:
+    if sample_idx >= 0:
+        # 记录单个样本的 turn 数据
+        _checkpoint.turn_advantages[sample_idx] = turn_data.copy()
+    
+    if discounted_returns is not None:
+        # 记录完整的 discounted_returns（在循环结束后调用）
         _checkpoint.discounted_returns = discounted_returns.detach().clone()
 
 
@@ -737,157 +751,51 @@ def run_all_checks(
     response_mask: Optional[torch.Tensor] = None,
     normalized_rewards: Optional[torch.Tensor] = None,
 ) -> List[CheckResult]:
-    """运行所有验证检查"""
+    """
+    运行所有验证检查 - 完整逻辑验证（非抽样）
+    
+    所有检查都对全部样本执行，只在发现错误时输出详细信息。
+    """
     if not is_strict_check_enabled():
         return []
     
     results = []
     
-    # 获取样本数量
-    num_samples = len(_checkpoint.generation_info_gains) if _checkpoint.generation_info_gains else 0
-    if num_samples == 0 and _checkpoint.core_algos_rewards is not None:
-        num_samples = min(3, _checkpoint.core_algos_rewards.shape[0])
-    
     print("\n" + "=" * 80)
-    print("    IGPO STRICT PIPELINE VERIFICATION")
+    print("    IGPO STRICT PIPELINE VERIFICATION (FULL)")
     print("=" * 80)
     
-    # ========== Check 1: Generation 阶段 info_gain 计算 ==========
-    print("\n>>> CHECK 1: Generation Phase - Info Gain Calculation")
-    gen_mode = _checkpoint.generation_mode
-    gen_samples = len(_checkpoint.generation_info_gains)
-    if gen_samples > 0:
-        total_ig = sum(len(v) for v in _checkpoint.generation_info_gains.values())
-        print(f"  ✓ Mode: {gen_mode}")
-        print(f"  ✓ Samples recorded: {gen_samples}")
-        print(f"  ✓ Total info_gain values: {total_ig}")
-        
-        # 显示前 3 个样本的详细信息
-        for i in list(_checkpoint.generation_info_gains.keys())[:3]:
-            rewards = _checkpoint.generation_info_gains[i]
-            print(f"    Sample {i}: {len(rewards)} turns, values = {[f'{r:.6f}' for r in rewards]}")
-        
-        results.append(CheckResult("Check 1: Generation", True, f"{gen_samples} samples, {total_ig} info_gain values"))
-    else:
-        print(f"  ⚠️ No generation data recorded")
-        results.append(CheckResult("Check 1: Generation", True, "No data (skipped)", {}))
-    
-    # ========== Check 2: info_gain.py 分配验证 ==========
-    print("\n>>> CHECK 2: info_gain.py - Reward Assignment")
-    ig_samples = len(_checkpoint.info_gain_received)
-    if ig_samples > 0:
-        print(f"  Samples with assignments: {ig_samples}")
-        
-        for sample_idx in list(_checkpoint.info_gain_received.keys())[:3]:
-            rewards = _checkpoint.info_gain_received.get(sample_idx, [])
-            positions = _checkpoint.info_gain_positions.get(sample_idx, [])
-            f1_pos = _checkpoint.f1_positions.get(sample_idx, -1)
-            f1_score = _checkpoint.f1_scores.get(sample_idx, 0.0)
-            
-            print(f"\n  Sample {sample_idx}:")
-            print(f"    InfoGain: {len(rewards)} values at positions {positions}")
-            print(f"    F1: {f1_score:.4f} at position {f1_pos}")
-            
-            # 验证与 generation 阶段的一致性
-            result = verify_info_gain_consistency(sample_idx)
-            results.append(result)
-            status = "✓" if result.passed else "✗"
-            print(f"    Consistency with generation: {status} {result.message}")
-    else:
-        print(f"  ⚠️ No info_gain.py assignment data")
-    
-    # ========== Check 3: core_algos.py 传输验证 ==========
-    print("\n>>> CHECK 3: core_algos.py - Reward Transmission")
-    if _checkpoint.core_algos_rewards is not None:
-        bsz = _checkpoint.core_algos_rewards.shape[0]
-        seq_len = _checkpoint.core_algos_rewards.shape[1]
-        print(f"  Received rewards: shape ({bsz}, {seq_len})")
-        
-        for sample_idx in range(min(3, bsz)):
-            core_positions = _checkpoint.core_algos_positions.get(sample_idx, [])
-            core_values = [_checkpoint.core_algos_rewards[sample_idx, p].item() for p in core_positions] if core_positions else []
-            
-            print(f"\n  Sample {sample_idx}:")
-            print(f"    Positions: {core_positions}")
-            print(f"    Values: {[f'{v:.6f}' for v in core_values]}")
-            
-            result = verify_reward_transmission(sample_idx)
-            results.append(result)
-            status = "✓" if result.passed else "✗"
-            print(f"    Transmission verification: {status} {result.message}")
-    else:
-        print(f"  ⚠️ No core_algos reward data")
-    
-    # ========== Check 4: 归一化验证 ==========
-    print("\n>>> CHECK 4: Normalization")
-    result = verify_normalization(norm_mode, norm_by_std)
+    # ========== Check 1: Generation 阶段完整性验证 ==========
+    result = _full_check_1_generation()
     results.append(result)
+    _print_check_summary(result)
     
-    print(f"  Mode: {norm_mode}, Norm by std: {norm_by_std}")
-    if _checkpoint.norm_before_stats:
-        print(f"  Before normalization:")
-        for key, stats in _checkpoint.norm_before_stats.items():
-            print(f"    {key}: mean={stats['mean']:.4f}, std={stats['std']:.4f}, count={stats['count']}")
-    if _checkpoint.norm_after_stats:
-        print(f"  After normalization:")
-        for key, stats in _checkpoint.norm_after_stats.items():
-            print(f"    {key}: mean={stats['mean']:.4f}, std={stats['std']:.4f}, count={stats['count']}")
-    status = "✓" if result.passed else "✗"
-    print(f"  Verification: {status} {result.message}")
+    # ========== Check 2: info_gain.py 一致性完整验证 ==========
+    result = _full_check_2_consistency()
+    results.append(result)
+    _print_check_summary(result)
     
-    # ========== Check 5: Turn-level 折扣累积和广播 ==========
-    print("\n>>> CHECK 5: Turn-Level Discounting & Broadcasting")
-    print(f"  Gamma: {gamma}")
+    # ========== Check 3: core_algos.py 传输完整验证 ==========
+    result = _full_check_3_transmission()
+    results.append(result)
+    _print_check_summary(result)
     
-    for sample_idx in range(min(3, num_samples)):
-        turn_data = _checkpoint.turn_advantages.get(sample_idx, [])
-        if not turn_data:
-            continue
-        
-        print(f"\n  Sample {sample_idx}:")
-        print(f"    Turns: {len(turn_data)}")
-        
-        # Check 5a: 折扣累积公式
-        if normalized_rewards is not None:
-            result = verify_turn_level_discounting(sample_idx, gamma, normalized_rewards)
-            results.append(result)
-            status = "✓" if result.passed else "✗"
-            print(f"    Discounting formula: {status} {result.message}")
-            
-            # 显示详细的折扣累积过程
-            for i, (pos, adv) in enumerate(turn_data):
-                if i == len(turn_data) - 1:
-                    print(f"      Turn {i}: r={normalized_rewards[sample_idx, pos].item():.4f}, A={adv:.4f} (last turn)")
-                else:
-                    next_adv = turn_data[i+1][1]
-                    r_i = normalized_rewards[sample_idx, pos].item()
-                    expected = r_i + gamma * next_adv
-                    match = "✓" if abs(expected - adv) < 1e-6 else "✗"
-                    print(f"      Turn {i}: r={r_i:.4f} + γ*A_{i+1}={gamma}*{next_adv:.4f} = {expected:.4f}, actual={adv:.4f} {match}")
-        
-        # Check 5b: 广播正确性
-        if response_mask is not None:
-            result = verify_turn_broadcast(sample_idx, response_mask)
-            results.append(result)
-            status = "✓" if result.passed else "✗"
-            print(f"    Broadcast uniformity: {status} {result.message}")
+    # ========== Check 4: 归一化数学验证 ==========
+    result = _full_check_4_normalization(norm_mode, norm_by_std)
+    results.append(result)
+    _print_check_summary(result)
     
-    # ========== Check 6: Info Gain 贡献验证 ==========
-    print("\n>>> CHECK 6: Info Gain Contribution to Loss")
-    if response_mask is not None:
-        result = verify_info_gain_contribution(response_mask)
+    # ========== Check 5: Turn-level 折扣累积完整验证 ==========
+    if normalized_rewards is not None and response_mask is not None:
+        result = _full_check_5_turn_level(gamma, normalized_rewards, response_mask)
         results.append(result)
-        
-        status = "✓" if result.passed else "✗"
-        print(f"  {status} {result.message}")
-        
-        if result.details.get("detailed_analysis"):
-            for analysis in result.details["detailed_analysis"]:
-                print(f"\n  Sample {analysis['sample_idx']}:")
-                print(f"    Turns: {analysis['num_turns']}")
-                print(f"    Turn advantages: {[f'{a:.4f}' for a in analysis['turn_advantages']]}")
-                print(f"    Advantage variance: {analysis['adv_variance']:.6f}")
-                print(f"    Non-zero ratio: {analysis['nonzero_ratio']:.2%}")
+        _print_check_summary(result)
+    
+    # ========== Check 6: Info Gain 贡献完整验证 ==========
+    if response_mask is not None:
+        result = _full_check_6_contribution(response_mask)
+        results.append(result)
+        _print_check_summary(result)
     
     # ========== 总结 ==========
     passed = sum(1 for r in results if r.passed)
@@ -899,10 +807,434 @@ def run_all_checks(
     else:
         failed_checks = [r.check_name for r in results if not r.passed]
         print(f"    ⚠️ FAILED CHECKS: {failed_checks}")
-        print("    Please review the details above.")
     print("=" * 80 + "\n")
     
     return results
+
+
+def _print_check_summary(result: CheckResult):
+    """打印单个检查的摘要"""
+    status = "✓ PASS" if result.passed else "✗ FAIL"
+    print(f"\n[{status}] {result.check_name}")
+    print(f"  {result.message}")
+    if not result.passed and result.details:
+        # 只在失败时打印详细信息
+        if "failed_samples" in result.details:
+            failed = result.details["failed_samples"][:5]  # 最多显示 5 个
+            print(f"  Failed samples (first 5): {failed}")
+        if "error_details" in result.details:
+            for detail in result.details["error_details"][:3]:  # 最多显示 3 个详细错误
+                print(f"    - {detail}")
+
+
+# ============================================================================
+# 完整验证函数
+# ============================================================================
+
+def _full_check_1_generation() -> CheckResult:
+    """Check 1: 验证 generation 阶段数据完整性"""
+    gen_data = _checkpoint.generation_info_gains
+    mode = _checkpoint.generation_mode
+    
+    if not gen_data:
+        return CheckResult(
+            "Check 1: Generation",
+            True,
+            "No generation data (skipped)",
+            {}
+        )
+    
+    total_samples = len(gen_data)
+    total_ig_values = sum(len(v) for v in gen_data.values())
+    
+    # 验证：所有 info_gain 值都应该是有限数
+    invalid_samples = []
+    for sample_idx, rewards in gen_data.items():
+        for i, r in enumerate(rewards):
+            if not np.isfinite(r):
+                invalid_samples.append((sample_idx, i, r))
+    
+    if invalid_samples:
+        return CheckResult(
+            "Check 1: Generation",
+            False,
+            f"Found {len(invalid_samples)} invalid (inf/nan) values",
+            {"failed_samples": [s[0] for s in invalid_samples], "error_details": invalid_samples[:5]}
+        )
+    
+    return CheckResult(
+        "Check 1: Generation",
+        True,
+        f"Mode={mode}, {total_samples} samples, {total_ig_values} info_gain values, all finite",
+        {"total_samples": total_samples, "total_ig_values": total_ig_values}
+    )
+
+
+def _full_check_2_consistency() -> CheckResult:
+    """Check 2: 完整验证 info_gain.py 与 generation 的一致性"""
+    gen_data = _checkpoint.generation_info_gains
+    received_data = _checkpoint.info_gain_received
+    
+    if not gen_data or not received_data:
+        return CheckResult(
+            "Check 2: Consistency",
+            True,
+            "No data to compare (skipped)",
+            {}
+        )
+    
+    # 对所有共同样本进行验证
+    common_samples = set(gen_data.keys()) & set(received_data.keys())
+    
+    mismatched_samples = []
+    for sample_idx in common_samples:
+        gen_rewards = gen_data[sample_idx]
+        recv_rewards = received_data[sample_idx]
+        
+        # 长度检查
+        if len(gen_rewards) != len(recv_rewards):
+            mismatched_samples.append({
+                "sample": sample_idx,
+                "reason": f"length mismatch: gen={len(gen_rewards)}, recv={len(recv_rewards)}"
+            })
+            continue
+        
+        # 值检查
+        for i, (g, r) in enumerate(zip(gen_rewards, recv_rewards)):
+            if not np.isclose(g, r, rtol=1e-5, atol=1e-8):
+                mismatched_samples.append({
+                    "sample": sample_idx,
+                    "reason": f"turn {i}: gen={g:.6f}, recv={r:.6f}, diff={abs(g-r):.2e}"
+                })
+                break  # 一个样本只报告第一个不匹配
+    
+    if mismatched_samples:
+        return CheckResult(
+            "Check 2: Consistency",
+            False,
+            f"{len(mismatched_samples)}/{len(common_samples)} samples have mismatches",
+            {
+                "failed_samples": [m["sample"] for m in mismatched_samples],
+                "error_details": [m["reason"] for m in mismatched_samples[:5]]
+            }
+        )
+    
+    return CheckResult(
+        "Check 2: Consistency",
+        True,
+        f"All {len(common_samples)} samples consistent between generation and info_gain.py",
+        {"verified_samples": len(common_samples)}
+    )
+
+
+def _full_check_3_transmission() -> CheckResult:
+    """Check 3: 完整验证 reward 传输到 core_algos"""
+    if _checkpoint.core_algos_rewards is None:
+        return CheckResult(
+            "Check 3: Transmission",
+            True,
+            "No core_algos data (skipped)",
+            {}
+        )
+    
+    received_data = _checkpoint.info_gain_received
+    positions_data = _checkpoint.info_gain_positions
+    f1_scores = _checkpoint.f1_scores
+    f1_positions = _checkpoint.f1_positions
+    core_rewards = _checkpoint.core_algos_rewards
+    core_positions = _checkpoint.core_algos_positions
+    
+    if not received_data:
+        return CheckResult(
+            "Check 3: Transmission",
+            True,
+            "No info_gain.py data to compare (skipped)",
+            {}
+        )
+    
+    bsz = core_rewards.shape[0]
+    mismatched_samples = []
+    
+    for sample_idx in range(bsz):
+        if sample_idx not in received_data:
+            continue
+        
+        # 预期位置
+        ig_pos = positions_data.get(sample_idx, [])
+        f1_pos = f1_positions.get(sample_idx, -1)
+        f1_score = f1_scores.get(sample_idx, 0.0)
+        
+        expected_positions = set(ig_pos)
+        if f1_pos >= 0 and f1_score != 0:
+            expected_positions.add(f1_pos)
+        
+        # 实际位置
+        actual_positions = set(core_positions.get(sample_idx, []))
+        
+        # 位置验证
+        if expected_positions != actual_positions:
+            mismatched_samples.append({
+                "sample": sample_idx,
+                "reason": f"position mismatch: expected={sorted(expected_positions)}, actual={sorted(actual_positions)}"
+            })
+            continue
+        
+        # 值验证（对 info_gain 位置）
+        ig_rewards = received_data.get(sample_idx, [])
+        for i, pos in enumerate(ig_pos):
+            if i >= len(ig_rewards):
+                break
+            expected_val = ig_rewards[i]
+            actual_val = core_rewards[sample_idx, pos].item()
+            # 0 可能被替换为 1e-10
+            if not (np.isclose(expected_val, actual_val, rtol=1e-5, atol=1e-8) or
+                    (expected_val == 0 and np.isclose(actual_val, 1e-10, atol=1e-12))):
+                mismatched_samples.append({
+                    "sample": sample_idx,
+                    "reason": f"value mismatch at pos {pos}: expected={expected_val:.6f}, actual={actual_val:.6f}"
+                })
+                break
+    
+    verified_count = len([s for s in range(bsz) if s in received_data])
+    
+    if mismatched_samples:
+        return CheckResult(
+            "Check 3: Transmission",
+            False,
+            f"{len(mismatched_samples)}/{verified_count} samples have transmission errors",
+            {
+                "failed_samples": [m["sample"] for m in mismatched_samples],
+                "error_details": [m["reason"] for m in mismatched_samples[:5]]
+            }
+        )
+    
+    return CheckResult(
+        "Check 3: Transmission",
+        True,
+        f"All {verified_count} samples correctly transmitted to core_algos",
+        {"verified_samples": verified_count}
+    )
+
+
+def _full_check_4_normalization(norm_mode: str, norm_by_std: bool) -> CheckResult:
+    """Check 4: 数学验证归一化正确性"""
+    before_stats = _checkpoint.norm_before_stats
+    after_stats = _checkpoint.norm_after_stats
+    
+    if not after_stats:
+        return CheckResult(
+            "Check 4: Normalization",
+            True,
+            "No normalization stats (skipped)",
+            {}
+        )
+    
+    errors = []
+    
+    for key, stats in after_stats.items():
+        mean = stats["mean"]
+        std = stats["std"]
+        count = stats["count"]
+        
+        # 数学验证：归一化后 mean 应该接近 0
+        if abs(mean) > 0.1:
+            errors.append(f"{key}: mean={mean:.4f} not close to 0")
+        
+        # 数学验证：如果 norm_by_std 且 count > 1，std 应该接近 1
+        if norm_by_std and count > 1:
+            if abs(std - 1.0) > 0.2:
+                errors.append(f"{key}: std={std:.4f} not close to 1")
+    
+    if errors:
+        return CheckResult(
+            "Check 4: Normalization",
+            False,
+            f"Normalization validation failed: {len(errors)} issues",
+            {"error_details": errors}
+        )
+    
+    stats_summary = ", ".join([f"{k}: mean={v['mean']:.4f}, std={v['std']:.4f}" for k, v in after_stats.items()])
+    return CheckResult(
+        "Check 4: Normalization",
+        True,
+        f"Mode={norm_mode}, norm_by_std={norm_by_std}. After: {stats_summary}",
+        {"after_stats": after_stats}
+    )
+
+
+def _full_check_5_turn_level(
+    gamma: float,
+    normalized_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> CheckResult:
+    """Check 5: 完整验证 turn-level 折扣累积和广播"""
+    turn_data_all = _checkpoint.turn_advantages
+    discounted_returns = _checkpoint.discounted_returns
+    
+    if not turn_data_all or discounted_returns is None:
+        return CheckResult(
+            "Check 5: Turn-Level",
+            True,
+            "No turn-level data (skipped)",
+            {}
+        )
+    
+    bsz = discounted_returns.shape[0]
+    
+    # 5a: 验证折扣累积公式 A_i = r_i + γ * A_{i+1}
+    formula_errors = []
+    
+    for sample_idx, turn_data in turn_data_all.items():
+        if len(turn_data) == 0:
+            continue
+        
+        for i in range(len(turn_data) - 1, -1, -1):
+            pos, actual_adv = turn_data[i]
+            r_i = normalized_rewards[sample_idx, pos].item()
+            
+            if i == len(turn_data) - 1:
+                expected = r_i
+            else:
+                next_adv = turn_data[i + 1][1]
+                expected = r_i + gamma * next_adv
+            
+            if abs(expected - actual_adv) > 1e-5:
+                formula_errors.append({
+                    "sample": sample_idx,
+                    "turn": i,
+                    "expected": expected,
+                    "actual": actual_adv
+                })
+    
+    # 5b: 验证 turn 内广播一致性
+    broadcast_errors = []
+    
+    for sample_idx, turn_data in turn_data_all.items():
+        if len(turn_data) == 0:
+            continue
+        
+        sample_returns = discounted_returns[sample_idx]
+        sample_mask = response_mask[sample_idx]
+        
+        prev_end = 0
+        for turn_idx, (reward_pos, expected_adv) in enumerate(turn_data):
+            # 检查 [prev_end, reward_pos] 范围内的所有有效 tokens
+            for t in range(prev_end, reward_pos + 1):
+                if sample_mask[t] == 1:
+                    actual = sample_returns[t].item()
+                    if abs(actual - expected_adv) > 1e-5:
+                        broadcast_errors.append({
+                            "sample": sample_idx,
+                            "turn": turn_idx,
+                            "token": t,
+                            "expected": expected_adv,
+                            "actual": actual
+                        })
+                        break  # 每个 turn 只报告第一个错误
+            prev_end = reward_pos + 1
+    
+    total_verified = len(turn_data_all)
+    
+    if formula_errors or broadcast_errors:
+        error_details = []
+        if formula_errors:
+            error_details.append(f"Formula errors: {len(formula_errors)} (samples: {list(set(e['sample'] for e in formula_errors))[:5]})")
+        if broadcast_errors:
+            error_details.append(f"Broadcast errors: {len(broadcast_errors)} (samples: {list(set(e['sample'] for e in broadcast_errors))[:5]})")
+        
+        return CheckResult(
+            "Check 5: Turn-Level",
+            False,
+            f"Verified {total_verified} samples, found errors",
+            {
+                "formula_errors": len(formula_errors),
+                "broadcast_errors": len(broadcast_errors),
+                "error_details": error_details
+            }
+        )
+    
+    return CheckResult(
+        "Check 5: Turn-Level",
+        True,
+        f"All {total_verified} samples pass turn-level discounting (γ={gamma}) and broadcast verification",
+        {"verified_samples": total_verified, "gamma": gamma}
+    )
+
+
+def _full_check_6_contribution(response_mask: torch.Tensor) -> CheckResult:
+    """Check 6: 完整验证 info_gain 对 advantage 的贡献"""
+    turn_data_all = _checkpoint.turn_advantages
+    discounted_returns = _checkpoint.discounted_returns
+    
+    if not turn_data_all or discounted_returns is None:
+        return CheckResult(
+            "Check 6: Contribution",
+            True,
+            "No data (skipped)",
+            {}
+        )
+    
+    bsz = discounted_returns.shape[0]
+    
+    samples_with_contribution = 0
+    samples_with_variance = 0  # 有 turn 间差异的样本（说明 info_gain 起作用）
+    total_samples = 0
+    
+    zero_return_samples = []  # 有效位置全为 0 的样本
+    
+    for sample_idx, turn_data in turn_data_all.items():
+        if len(turn_data) == 0:
+            continue
+        
+        total_samples += 1
+        sample_returns = discounted_returns[sample_idx]
+        sample_mask = response_mask[sample_idx]
+        
+        # 检查有效位置的非零比率
+        valid_returns = sample_returns[sample_mask == 1]
+        nonzero_count = (valid_returns != 0).sum().item()
+        total_valid = valid_returns.numel()
+        
+        if nonzero_count > 0:
+            samples_with_contribution += 1
+        else:
+            zero_return_samples.append(sample_idx)
+        
+        # 检查 turn 间是否有差异
+        if len(turn_data) > 1:
+            turn_advs = [adv for _, adv in turn_data]
+            variance = np.var(turn_advs)
+            if variance > 1e-8:
+                samples_with_variance += 1
+    
+    # 验证条件：
+    # 1. 至少 80% 的样本有非零 advantage
+    # 2. 如果有多 turn 样本，应该有 turn 间差异
+    
+    contribution_ratio = samples_with_contribution / max(total_samples, 1)
+    
+    if contribution_ratio < 0.5:  # 低于 50% 认为有问题
+        return CheckResult(
+            "Check 6: Contribution",
+            False,
+            f"Only {samples_with_contribution}/{total_samples} ({contribution_ratio:.1%}) samples have info_gain contribution",
+            {
+                "contribution_ratio": contribution_ratio,
+                "zero_return_samples": zero_return_samples[:10],
+                "samples_with_variance": samples_with_variance
+            }
+        )
+    
+    return CheckResult(
+        "Check 6: Contribution",
+        True,
+        f"{samples_with_contribution}/{total_samples} ({contribution_ratio:.1%}) samples have info_gain contribution, {samples_with_variance} have turn variance",
+        {
+            "contribution_ratio": contribution_ratio,
+            "samples_with_variance": samples_with_variance,
+            "total_samples": total_samples
+        }
+    )
 
 
 def _print_check_result(result: CheckResult):

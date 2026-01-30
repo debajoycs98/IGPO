@@ -118,9 +118,9 @@ def _compute_turn_level_advantage(
                     discounted_returns[sample_idx, t] = adv
             prev_end = reward_pos + 1
         
-        # ========== 严格验证：记录 turn-level 结果 ==========
+        # ========== 严格验证：记录 turn-level 结果（只记录 turn_data）==========
         if strict_check:
-            record_turn_level_results(sample_idx, turn_data, discounted_returns)
+            record_turn_level_results(sample_idx, turn_data)
         
         # ========== DEBUG: 验证单个样本 ==========
         if debug_turn_level and sample_idx < 3:  # 只打印前 3 个样本
@@ -193,6 +193,10 @@ def _compute_turn_level_advantage(
             print(f"  ⚠️  WARNING: {non_uniform_count} samples have non-uniform advantages within turns!")
         else:
             print(f"  ✓ All samples have uniform advantages within each turn")
+    
+    # ========== 严格验证：在循环结束后记录完整的 discounted_returns ==========
+    if strict_check:
+        record_turn_level_results(-1, [], discounted_returns)
     
     return discounted_returns
 
