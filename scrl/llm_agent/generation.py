@@ -807,70 +807,83 @@ class LLMGenerationManager:
                 info_gain_type = self.config.info_gain_type
                 all_log_probs_results = []
                 
-                # Strategy: Merge all turns' data into one large batch, call compute_log_prob once
-                # Note: Each turn's batch_size may differ (due to different active sample counts)
-                # For simplicity, we process in turn order but only call compute_log_prob once (merged data)
+                # Strategy: Use LEFT PADDING to merge all turns into one batch, call compute_log_prob ONCE
+                # Key insight: compute_log_prob slices logits from the END (logits[:, -response_length-1:-1])
+                # By using left padding, we ensure all samples have their response at the end of input_ids
+                # 
+                # Before (right padding - WRONG):
+                #   Turn 0: [prompt][response][PAD...]  → response NOT at end
+                #   Turn 1: [prompt][response][PAD...]  → response NOT at end
+                # 
+                # After (left padding - CORRECT):
+                #   Turn 0: [PAD...][prompt][response]  → response at end ✓
+                #   Turn 1: [PAD...][prompt][response]  → response at end ✓
                 
-                # Collect all pseudo_outputs, find max sequence length
+                gt_idx = vectorized_data_collector['gt_idx']
+                
+                # Collect all turns' data
                 all_input_ids = []
                 all_attention_mask = []
-                all_position_ids = []
-                all_prompts = []
                 all_responses = []
-                turn_boundaries = [0]  # Start position of each turn in merged batch
+                turn_batch_sizes = []
+                turn_response_lengths = []
                 
                 for turn_idx, pseudo_output in enumerate(vectorized_data_collector['pseudo_outputs_per_turn']):
                     batch_size = pseudo_output.batch['input_ids'].shape[0]
+                    turn_batch_sizes.append(batch_size)
                     all_input_ids.append(pseudo_output.batch['input_ids'])
                     all_attention_mask.append(pseudo_output.batch['attention_mask'])
-                    all_position_ids.append(pseudo_output.batch['position_ids'])
-                    all_prompts.append(pseudo_output.batch['prompts'])
                     all_responses.append(pseudo_output.batch['responses'])
-                    turn_boundaries.append(turn_boundaries[-1] + batch_size)
+                    turn_response_lengths.append(pseudo_output.batch['responses'].shape[1])
                 
-                # Find max length and pad
+                # Find max lengths
                 max_seq_len = max(t.shape[1] for t in all_input_ids)
-                max_prompt_len = max(t.shape[1] for t in all_prompts)
                 max_response_len = max(t.shape[1] for t in all_responses)
                 
+                # Apply LEFT padding to input_ids and attention_mask
+                # Apply RIGHT padding to responses (to keep gt_idx correct)
                 padded_input_ids = []
                 padded_attention_mask = []
-                padded_position_ids = []
-                padded_prompts = []
                 padded_responses = []
                 
                 for i in range(len(all_input_ids)):
-                    # Pad input_ids
-                    pad_len = max_seq_len - all_input_ids[i].shape[1]
-                    if pad_len > 0:
-                        padded_input_ids.append(F.pad(all_input_ids[i], (0, pad_len), value=self.tokenizer.pad_token_id))
-                        padded_attention_mask.append(F.pad(all_attention_mask[i], (0, pad_len), value=0))
-                        padded_position_ids.append(F.pad(all_position_ids[i], (0, pad_len), value=0))
+                    curr_seq_len = all_input_ids[i].shape[1]
+                    curr_resp_len = all_responses[i].shape[1]
+                    
+                    # LEFT padding for input_ids: pad at the beginning (left side)
+                    left_pad_len = max_seq_len - curr_seq_len
+                    if left_pad_len > 0:
+                        # F.pad format: (left, right) for 2D tensor's last dim
+                        padded_input_ids.append(F.pad(all_input_ids[i], (left_pad_len, 0), value=self.tokenizer.pad_token_id))
+                        padded_attention_mask.append(F.pad(all_attention_mask[i], (left_pad_len, 0), value=0))
                     else:
                         padded_input_ids.append(all_input_ids[i])
                         padded_attention_mask.append(all_attention_mask[i])
-                        padded_position_ids.append(all_position_ids[i])
                     
-                    # Pad prompts
-                    prompt_pad_len = max_prompt_len - all_prompts[i].shape[1]
-                    if prompt_pad_len > 0:
-                        padded_prompts.append(F.pad(all_prompts[i], (0, prompt_pad_len), value=self.tokenizer.pad_token_id))
-                    else:
-                        padded_prompts.append(all_prompts[i])
-                    
-                    # Pad responses
-                    response_pad_len = max_response_len - all_responses[i].shape[1]
-                    if response_pad_len > 0:
-                        padded_responses.append(F.pad(all_responses[i], (0, response_pad_len), value=self.tokenizer.pad_token_id))
+                    # RIGHT padding for responses: pad at the end (right side)
+                    # This keeps gt_idx positions correct since actual content is at the beginning
+                    right_pad_len = max_response_len - curr_resp_len
+                    if right_pad_len > 0:
+                        padded_responses.append(F.pad(all_responses[i], (0, right_pad_len), value=self.tokenizer.pad_token_id))
                     else:
                         padded_responses.append(all_responses[i])
                 
                 # Merge into one large batch
                 merged_input_ids = torch.cat(padded_input_ids, dim=0)
                 merged_attention_mask = torch.cat(padded_attention_mask, dim=0)
-                merged_position_ids = torch.cat(padded_position_ids, dim=0)
-                merged_prompts = torch.cat(padded_prompts, dim=0)
                 merged_responses = torch.cat(padded_responses, dim=0)
+                
+                # Recompute position_ids based on the new attention_mask (left-padded)
+                # position_ids should be cumsum of attention_mask - 1, with 0 for pad positions
+                merged_position_ids = merged_attention_mask.cumsum(dim=1) - 1
+                merged_position_ids = merged_position_ids.clamp(min=0)  # Ensure non-negative
+                
+                # For prompts, we use left padding as well
+                # But compute_log_prob may not use prompts directly, so we can derive it
+                # prompts = input_ids[:, :-response_length] after padding adjustments
+                # For simplicity, we compute prompts from input_ids and response_length
+                prompt_len = max_seq_len - max_response_len
+                merged_prompts = merged_input_ids[:, :prompt_len]
                 
                 merged_batch = DataProto.from_dict({
                     'prompts': merged_prompts,
@@ -880,61 +893,60 @@ class LLMGenerationManager:
                     'position_ids': merged_position_ids,
                 })
                 
-                print(f"[IGPO] Vectorized: Merged batch size = {merged_input_ids.shape[0]}, seq_len = {merged_input_ids.shape[1]}")
-                print(f"[IGPO] Vectorized: merged_responses.shape = {merged_responses.shape}")
-                print(f"[IGPO] Vectorized: turn_boundaries = {turn_boundaries}")
+                total_samples = merged_input_ids.shape[0]
+                print(f"[IGPO] Vectorized (LEFT PADDING): Merged {num_turns_collected} turns into batch size = {total_samples}, seq_len = {max_seq_len}, resp_len = {max_response_len}")
                 
-                # Call compute_log_prob once
+                # Call compute_log_prob ONCE for all turns
                 merged_log_probs = self.actor_rollout_wg.compute_log_prob(merged_batch)
+                merged_old_log_probs = merged_log_probs.batch['old_log_probs']
+                merged_entropys = merged_log_probs.batch['entropys']
                 
-                print(f"[IGPO] Vectorized: compute_log_prob completed")
-                print(f"[IGPO] Vectorized: merged_log_probs['old_log_probs'].shape = {merged_log_probs.batch['old_log_probs'].shape}")
+                print(f"[IGPO] Vectorized: compute_log_prob completed, merged_old_log_probs.shape = {merged_old_log_probs.shape}")
                 
-                # Extract each turn's results from merged results and compute info_gain_rewards
-                gt_idx = vectorized_data_collector['gt_idx']
+                # Extract each turn's results and compute info_gain_rewards
+                # turn_boundaries marks the start index of each turn in the merged batch
+                turn_boundaries = [0]
+                for bs in turn_batch_sizes:
+                    turn_boundaries.append(turn_boundaries[-1] + bs)
                 
                 for turn_idx in range(num_turns_collected):
                     start_idx = turn_boundaries[turn_idx]
                     end_idx = turn_boundaries[turn_idx + 1]
                     activate_list_for_turn = vectorized_data_collector['activate_lists_per_turn'][turn_idx]
                     
-                    # Extract current turn's log_probs
-                    turn_old_log_probs = merged_log_probs.batch['old_log_probs'][start_idx:end_idx]
-                    turn_entropys = merged_log_probs.batch['entropys'][start_idx:end_idx]
+                    # Extract current turn's log_probs from merged results
+                    # Note: merged_old_log_probs has shape [total_samples, max_response_len]
+                    turn_old_log_probs = merged_old_log_probs[start_idx:end_idx]
+                    turn_entropys = merged_entropys[start_idx:end_idx]
                     
                     # DEBUG: Print turn info
                     if turn_idx < 2:
                         print(f"[DEBUG VEC] turn_idx={turn_idx}, start_idx={start_idx}, end_idx={end_idx}")
                         print(f"[DEBUG VEC] turn_old_log_probs.shape={turn_old_log_probs.shape}")
                         print(f"[DEBUG VEC] activate_list_for_turn length={len(activate_list_for_turn)}")
-                        print(f"[DEBUG VEC] activate_list_for_turn[:5]={activate_list_for_turn[:5]}")
-                        # Check first sample's log_probs
                         if len(activate_list_for_turn) > 0:
                             first_global_idx = activate_list_for_turn[0]
                             first_gt_range = gt_idx[first_global_idx]
                             print(f"[DEBUG VEC] first sample global_idx={first_global_idx}, gt_range={first_gt_range}")
                             if first_gt_range[0] < first_gt_range[1]:
-                                first_log_probs = turn_old_log_probs[0, first_gt_range[0]:first_gt_range[1]]
+                                # Use global_idx within the turn's slice (global_idx maps to position in the turn batch)
+                                first_log_probs = turn_old_log_probs[first_global_idx, first_gt_range[0]:first_gt_range[1]]
                                 print(f"[DEBUG VEC] first sample log_probs.shape={first_log_probs.shape}, mean={first_log_probs.mean().item():.6f}")
                     
                     if turn_idx == 0:
                         # First turn: initialize gt_values
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
-                            # Check if gt_idx range is valid
                             if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
                                 continue
-                            # NOTE: Use global_idx because info_gain_rollings_active preserves original batch size N,
-                            # so turn_old_log_probs has shape [N, response_len], not [len(activate_list), response_len]
                             log_probs = turn_old_log_probs[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
                             
-                            # Skip if mean_log_prob is nan or inf
                             if math.isnan(mean_log_prob) or math.isinf(mean_log_prob):
                                 continue
                             
                             if info_gain_type == "log_prob_diff":
                                 gt_values[global_idx] = mean_log_prob
-                            else:  # "prob_diff"
+                            else:
                                 gt_values[global_idx] = torch.exp(torch.tensor(mean_log_prob)).item()
                             
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
@@ -942,29 +954,23 @@ class LLMGenerationManager:
                     else:
                         # Subsequent turns: compute info_gain
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
-                            # Check if gt_idx range is valid
                             if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
                                 continue
-                            # Check if gt_values was initialized in turn 0, skip if not to avoid KeyError/nan
                             if global_idx not in gt_values:
                                 continue
-                            # NOTE: Use global_idx because info_gain_rollings_active preserves original batch size N,
-                            # so turn_old_log_probs has shape [N, response_len], not [len(activate_list), response_len]
                             log_probs = turn_old_log_probs[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
                             
-                            # Check for nan in mean_log_prob
                             if math.isnan(mean_log_prob):
                                 continue
                             
                             if info_gain_type == "log_prob_diff":
                                 cur_value = mean_log_prob
                                 info_gain = cur_value - gt_values[global_idx]
-                            else:  # "prob_diff"
+                            else:
                                 cur_value = torch.exp(torch.tensor(mean_log_prob)).item()
                                 info_gain = cur_value - gt_values[global_idx]
                             
-                            # Check for nan/inf in info_gain
                             if math.isnan(info_gain) or math.isinf(info_gain):
                                 continue
                             
@@ -972,14 +978,14 @@ class LLMGenerationManager:
                             gt_values[global_idx] = cur_value
                             
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
-                            # NOTE: Use global_idx for turn_entropys indexing (same reason as turn_old_log_probs)
                             gt_entropys_per_turn[global_idx].append(turn_entropys[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
-        
+                
                 # Statistics and print results
                 total_info_gains = sum(len(r) for r in info_gain_rewards)
                 print(f"[IGPO] Vectorized GT LogProb COMPLETED: "
-                      f"{num_turns_collected} turns, "
-                      f"{merged_input_ids.shape[0]} total samples processed, "
+                      f"{num_turns_collected} turns merged, "
+                      f"{total_samples} total samples, "
+                      f"1 compute_log_prob call, "
                       f"{total_info_gains} info_gain values computed")
                 
                 # ========== Verification: compare vectorized vs original mode ==========
