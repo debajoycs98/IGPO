@@ -1,3 +1,6 @@
+# Original debug utilities (must be first to maintain compatibility)
+from .performance import log_gpu_memory_usage, GPUMemoryLogger
+
 # IGPO Debug Utilities
 from .igpo_pipeline_checker import (
     is_strict_check_enabled,
