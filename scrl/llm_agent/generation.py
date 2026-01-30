@@ -295,6 +295,19 @@ class LLMGenerationManager:
         print(f"[DEBUG] run_llm_loop: global_steps={global_steps}, is_validation={is_validation}")
         print(f"node {node_rank} gains {len(gen_batch.batch['input_ids'])} * {self.config.n} datas!",flush=True)
         query_contents = self.parse_question(gen_batch.batch['input_ids'])
+        
+        # ===== CRITICAL LENGTH CHECK =====
+        print(f"[DEBUG] ===== LENGTH CHECK =====")
+        print(f"[DEBUG] gen_batch['input_ids'] shape: {gen_batch.batch['input_ids'].shape}")
+        print(f"[DEBUG] ground_truths length: {len(ground_truths)}")
+        print(f"[DEBUG] query_contents length: {len(query_contents)}")
+        print(f"[DEBUG] self.config.n: {self.config.n}")
+        print(f"[DEBUG] Expected messages_list length: {len(query_contents) * self.config.n}")
+        print(f"[DEBUG] Expected ground_truths_rolling length: {len(ground_truths) * self.config.n}")
+        if len(ground_truths) != len(query_contents):
+            print(f"[DEBUG] ⚠️ WARNING: ground_truths length ({len(ground_truths)}) != query_contents length ({len(query_contents)})!")
+        print(f"[DEBUG] ===========================")
+        
         messages_list = []
         agent_grpo_idx = []
         for gt in ground_truths:
@@ -498,6 +511,15 @@ class LLMGenerationManager:
                         info_gain_rollings_active.batch['attention_mask'][activate_list[i], :len(rollings_active.batch['attention_mask'][i])] = rollings_active.batch['attention_mask'][i]
                         info_gain_rollings_active.batch['position_ids'][activate_list[i], :len(rollings_active.batch['position_ids'][i])] = rollings_active.batch['position_ids'][i]    
             
+            # Debug: critical shape check before pseudo_generate_sequences
+            if step == 0:
+                print(f"[DEBUG step=0] ===== BEFORE pseudo_generate_sequences =====")
+                print(f"[DEBUG step=0] info_gain_rollings_active input_ids shape: {info_gain_rollings_active.batch['input_ids'].shape}")
+                print(f"[DEBUG step=0] pseudo_resps_with_gt length: {len(pseudo_resps_with_gt)}")
+                print(f"[DEBUG step=0] activate_list length: {len(activate_list)}")
+                if len(pseudo_resps_with_gt) != info_gain_rollings_active.batch['input_ids'].shape[0]:
+                    print(f"[DEBUG step=0] ⚠️ MISMATCH: pseudo_resps_with_gt ({len(pseudo_resps_with_gt)}) != batch_size ({info_gain_rollings_active.batch['input_ids'].shape[0]})")
+                print(f"[DEBUG step=0] ================================================")
             
             pseudo_gen_output = self.pseudo_generate_sequences(info_gain_rollings_active, pseudo_resps_with_gt)
 
@@ -579,13 +601,34 @@ class LLMGenerationManager:
                 info_gain_type = self.config.info_gain_type  # "prob_diff" or "log_prob_diff"
                 
                 if step == 0:
-                    # Debug: print old_log_probs shape at step 0 (first sample only)
-                    if len(activate_list) > 0:
-                        sample_idx = activate_list[0]
-                        old_log_probs_shape = pseudo_gen_output_log_probs.batch['old_log_probs'].shape
-                        print(f"[DEBUG step=0] old_log_probs shape: {old_log_probs_shape}, gt_idx[{sample_idx}]: {gt_idx[sample_idx]}")
+                    # Debug: print critical shape information at step 0
+                    old_log_probs_tensor = pseudo_gen_output_log_probs.batch['old_log_probs']
+                    old_log_probs_shape = old_log_probs_tensor.shape
+                    print(f"[DEBUG step=0] ===== CRITICAL SHAPE INFO =====")
+                    print(f"[DEBUG step=0] old_log_probs shape: {old_log_probs_shape}")
+                    print(f"[DEBUG step=0] old_log_probs dtype: {old_log_probs_tensor.dtype}")
+                    print(f"[DEBUG step=0] old_log_probs has_nan: {torch.isnan(old_log_probs_tensor).any().item()}")
+                    print(f"[DEBUG step=0] old_log_probs nan_count: {torch.isnan(old_log_probs_tensor).sum().item()} / {old_log_probs_tensor.numel()}")
+                    if not torch.isnan(old_log_probs_tensor).all():
+                        valid_mask = ~torch.isnan(old_log_probs_tensor)
+                        print(f"[DEBUG step=0] old_log_probs valid min: {old_log_probs_tensor[valid_mask].min().item():.4f}, max: {old_log_probs_tensor[valid_mask].max().item():.4f}")
+                    print(f"[DEBUG step=0] gt_idx length: {len(gt_idx)}")
+                    print(f"[DEBUG step=0] activate_list length: {len(activate_list)}")
+                    print(f"[DEBUG step=0] activate_list range: [{min(activate_list) if activate_list else 'N/A'}, {max(activate_list) if activate_list else 'N/A'}]")
+                    # Print first few gt_idx to check if they are valid
+                    print(f"[DEBUG step=0] First 5 gt_idx: {gt_idx[:5] if len(gt_idx) >= 5 else gt_idx}")
+                    print(f"[DEBUG step=0] pseudo_gen_output responses shape: {pseudo_gen_output.batch['responses'].shape}")
+                    print(f"[DEBUG step=0] ===============================")
                     
                     for i in activate_list:
+                        # Check if index is out of bounds for gt_idx
+                        if i >= len(gt_idx):
+                            print(f"[DEBUG step=0] ERROR: sample {i} >= gt_idx length {len(gt_idx)}, SKIPPING")
+                            continue
+                        # Check if index is out of bounds for old_log_probs
+                        if i >= old_log_probs_shape[0]:
+                            print(f"[DEBUG step=0] ERROR: sample {i} >= old_log_probs dim0 {old_log_probs_shape[0]}, SKIPPING")
+                            continue
                         # Check if gt_idx range is valid
                         if gt_idx[i][0] >= gt_idx[i][1]:
                             # Empty range, skip (keep gt_values[i] at initial value)
@@ -594,9 +637,9 @@ class LLMGenerationManager:
                         
                         # Debug: print first sample's log_probs details
                         if i == activate_list[0]:
-                            print(f"[DEBUG step=0] log_probs shape: {log_probs.shape}, numel: {log_probs.numel()}")
+                            print(f"[DEBUG step=0] Sample 0 log_probs shape: {log_probs.shape}, numel: {log_probs.numel()}")
                             if log_probs.numel() > 0:
-                                print(f"[DEBUG step=0] log_probs min: {log_probs.min().item():.4f}, max: {log_probs.max().item():.4f}, has_nan: {torch.isnan(log_probs).any().item()}")
+                                print(f"[DEBUG step=0] Sample 0 log_probs min: {log_probs.min().item():.4f}, max: {log_probs.max().item():.4f}, has_nan: {torch.isnan(log_probs).any().item()}")
                         
                         mean_log_prob = log_probs.mean().item()
                         
