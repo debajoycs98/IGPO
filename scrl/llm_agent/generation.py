@@ -558,6 +558,15 @@ class LLMGenerationManager:
                     verify_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
                     info_gain_type = self.config.info_gain_type
                     
+                    # DEBUG: Print original mode info for first turn
+                    if step < 2 and len(activate_list) > 0:
+                        print(f"[DEBUG ORIG step={step}] verify_log_probs.shape = {verify_log_probs.batch['old_log_probs'].shape}")
+                        first_idx = activate_list[0]
+                        first_gt_range = gt_idx[first_idx]
+                        if first_gt_range[0] < first_gt_range[1]:
+                            first_log_probs = verify_log_probs.batch['old_log_probs'][first_idx, first_gt_range[0]:first_gt_range[1]]
+                            print(f"[DEBUG ORIG step={step}] sample={first_idx}, gt_range={first_gt_range}, log_probs.mean={first_log_probs.mean().item():.6f}")
+                    
                     if step == 0:
                         for i in activate_list:
                             if gt_idx[i][0] >= gt_idx[i][1]:
@@ -872,11 +881,14 @@ class LLMGenerationManager:
                 })
                 
                 print(f"[IGPO] Vectorized: Merged batch size = {merged_input_ids.shape[0]}, seq_len = {merged_input_ids.shape[1]}")
+                print(f"[IGPO] Vectorized: merged_responses.shape = {merged_responses.shape}")
+                print(f"[IGPO] Vectorized: turn_boundaries = {turn_boundaries}")
                 
                 # Call compute_log_prob once
                 merged_log_probs = self.actor_rollout_wg.compute_log_prob(merged_batch)
                 
                 print(f"[IGPO] Vectorized: compute_log_prob completed")
+                print(f"[IGPO] Vectorized: merged_log_probs['old_log_probs'].shape = {merged_log_probs.batch['old_log_probs'].shape}")
                 
                 # Extract each turn's results from merged results and compute info_gain_rewards
                 gt_idx = vectorized_data_collector['gt_idx']
@@ -994,8 +1006,10 @@ class LLMGenerationManager:
                             
                             # Check if values are close (tolerance for floating point)
                             if abs_diff > 1e-5:
-                                print(f"[VERIFY] Sample {sample_idx}, Turn {turn_idx}: MISMATCH! "
-                                      f"vectorized={v:.8f}, original={o:.8f}, diff={abs_diff:.8e}")
+                                # Only print first 10 mismatches to avoid log spam
+                                if mismatch_count < 10:
+                                    print(f"[VERIFY] Sample {sample_idx}, Turn {turn_idx}: MISMATCH! "
+                                          f"vectorized={v:.8f}, original={o:.8f}, diff={abs_diff:.8e}")
                                 mismatch_count += 1
                             else:
                                 match_count += 1
