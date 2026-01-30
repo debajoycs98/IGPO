@@ -221,6 +221,14 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
         # TODO 这里改了原来的index方式，需要检查
         # TODO: test on more adv estimator type
         grpo_calculation_mask = data.batch["response_mask"]
+        
+        # DEBUG: 打印 multi_turn 值和 batch keys（只打印一次）
+        if not hasattr(compute_advantage, '_entry_debug'):
+            compute_advantage._entry_debug = True
+            print(f"[DEBUG compute_advantage] multi_turn={multi_turn}")
+            print(f"[DEBUG compute_advantage] batch keys: {list(data.batch.keys())}")
+            print(f"[DEBUG compute_advantage] 'loss_mask' in batch: {'loss_mask' in data.batch}")
+        
         if multi_turn:
             # If multi-turn, replace the mask with the relevant part of loss_mask
             response_length = grpo_calculation_mask.size(1)  # Get length from the initial response mask

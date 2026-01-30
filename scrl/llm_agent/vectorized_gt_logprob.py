@@ -874,13 +874,64 @@ def compute_gt_logprob_with_switch(
     Returns:
         同 compute_all_turns_vectorized
     """
+    debug_pipeline = os.environ.get("DEBUG_IGPO_PIPELINE", "0") == "1"
+    
     if is_vectorized_enabled():
-        return computer.compute_all_turns_vectorized(
+        gt_log_probs, gt_ranges = computer.compute_all_turns_vectorized(
             model, input_ids, attention_mask, position_ids,
             ground_truth_text, turn_end_positions, temperature
         )
+        
+        # ========== DEBUG: 验证点 6 - 向量化 GT LogP 计算正确性 ==========
+        if debug_pipeline and len(gt_log_probs) > 0:
+            print(f"\n[IGPO Pipeline Check 6] === vectorized_gt_logprob.py: GT LogP Computation ===")
+            print(f"  Mode: VECTORIZED")
+            print(f"  Number of turns: {len(turn_end_positions)}")
+            print(f"  Turn end positions: {turn_end_positions}")
+            print(f"  Input sequence length: {input_ids.shape[0]}")
+            print(f"  Ground truth length: {len(ground_truth_text)} chars")
+            
+            print(f"\n  GT Log Probabilities per turn:")
+            for t, (log_probs, (start, end)) in enumerate(zip(gt_log_probs, gt_ranges)):
+                if log_probs is not None and len(log_probs) > 0:
+                    # 只在答案范围内计算统计
+                    answer_log_probs = log_probs[start:end]
+                    mean_logp = answer_log_probs.mean().item() if len(answer_log_probs) > 0 else float('nan')
+                    sum_logp = answer_log_probs.sum().item() if len(answer_log_probs) > 0 else float('nan')
+                    
+                    print(f"    Turn {t}:")
+                    print(f"      Full GT length: {len(log_probs)}")
+                    print(f"      Answer range: [{start}, {end})")
+                    print(f"      Answer tokens: {end - start}")
+                    print(f"      Mean log prob: {mean_logp:.4f}")
+                    print(f"      Sum log prob:  {sum_logp:.4f}")
+                    
+                    # 检查是否有异常值
+                    if torch.isnan(log_probs).any():
+                        print(f"      ⚠️ WARNING: Contains NaN values!")
+                    if torch.isinf(log_probs).any():
+                        print(f"      ⚠️ WARNING: Contains Inf values!")
+        
+        return gt_log_probs, gt_ranges
     else:
-        return computer.compute_all_turns_sequential(
+        gt_log_probs, gt_ranges = computer.compute_all_turns_sequential(
             model, input_ids, attention_mask, position_ids,
             ground_truth_text, turn_end_positions, temperature
         )
+        
+        # ========== DEBUG: 验证点 6 - 顺序 GT LogP 计算 ==========
+        if debug_pipeline and len(gt_log_probs) > 0:
+            print(f"\n[IGPO Pipeline Check 6] === vectorized_gt_logprob.py: GT LogP Computation ===")
+            print(f"  Mode: SEQUENTIAL")
+            print(f"  Number of turns: {len(turn_end_positions)}")
+            
+            print(f"\n  GT Log Probabilities per turn:")
+            for t, (log_probs, (start, end)) in enumerate(zip(gt_log_probs, gt_ranges)):
+                if log_probs is not None and len(log_probs) > 0:
+                    answer_log_probs = log_probs[start:end]
+                    mean_logp = answer_log_probs.mean().item() if len(answer_log_probs) > 0 else float('nan')
+                    sum_logp = answer_log_probs.sum().item() if len(answer_log_probs) > 0 else float('nan')
+                    
+                    print(f"    Turn {t}: mean={mean_logp:.4f}, sum={sum_logp:.4f}, tokens={end-start}")
+        
+        return gt_log_probs, gt_ranges

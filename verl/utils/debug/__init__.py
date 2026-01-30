@@ -1,17 +1,16 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-from .performance import GPUMemoryLogger, log_gpu_memory_usage
-
-__all__ = ["GPUMemoryLogger", "log_gpu_memory_usage"]
+# IGPO Debug Utilities
+from .igpo_pipeline_checker import (
+    is_strict_check_enabled,
+    get_checkpoint,
+    reset_checkpoint,
+    record_generation_info_gain,
+    record_info_gain_assignment,
+    record_core_algos_rewards,
+    record_normalization_stats,
+    record_turn_level_results,
+    verify_vectorized_vs_sequential,
+    verify_info_gain_contribution,
+    run_all_checks,
+    save_results_for_comparison,
+    compare_vectorized_sequential,
+)

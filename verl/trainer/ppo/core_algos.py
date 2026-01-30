@@ -25,6 +25,177 @@ import torch
 
 import verl.utils.torch_functional as verl_F
 
+# 导入严格验证模块
+try:
+    from verl.utils.debug.igpo_pipeline_checker import (
+        is_strict_check_enabled,
+        record_core_algos_rewards,
+        record_normalization_stats,
+        record_turn_level_results,
+        run_all_checks,
+    )
+    _HAS_STRICT_CHECK = True
+except ImportError:
+    _HAS_STRICT_CHECK = False
+    def is_strict_check_enabled(): return False
+
+
+def _compute_turn_level_advantage(
+    normalized_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    gamma: float,
+    bsz: int,
+    seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Turn-level 折扣累积 + 广播实现。
+    
+    每个 turn 由 reward 位置定义（非零 reward 标记 turn 的结束）。
+    
+    计算流程：
+    1. 识别每个样本的 turn 边界（基于 reward 位置）
+    2. Turn-level 折扣累积：A_i = r_i + gamma * A_{i+1}
+    3. 广播：将 A_i 广播到 turn i 的所有 tokens
+    
+    Args:
+        normalized_rewards: 归一化后的 rewards (bsz, seq_len)
+        response_mask: 响应掩码 (bsz, seq_len)
+        gamma: 折扣因子
+        bsz: batch size
+        seq_len: 序列长度
+        device: 设备
+    
+    Returns:
+        discounted_returns: Turn-level advantage 广播到所有 tokens (bsz, seq_len)
+    """
+    import os
+    debug_turn_level = os.environ.get("DEBUG_TURN_LEVEL_ADV", "0") == "1"
+    strict_check = _HAS_STRICT_CHECK and is_strict_check_enabled()
+    
+    discounted_returns = torch.zeros(bsz, seq_len, device=device, dtype=normalized_rewards.dtype)
+    
+    # 用于 debug 统计
+    total_samples_with_rewards = 0
+    total_turns = 0
+    
+    for sample_idx in range(bsz):
+        sample_rewards = normalized_rewards[sample_idx]  # (seq_len,)
+        sample_mask = response_mask[sample_idx]  # (seq_len,)
+        
+        # Step 1: 找到所有 reward 位置（turn 结束位置）
+        reward_positions = (sample_rewards != 0).nonzero(as_tuple=True)[0].tolist()
+        
+        if len(reward_positions) == 0:
+            # 没有 reward，跳过
+            continue
+        
+        total_samples_with_rewards += 1
+        total_turns += len(reward_positions)
+        
+        # Step 2: Turn-level 折扣累积（从后向前）
+        # turn_data: [(reward_pos, turn_advantage), ...]
+        turn_data = []
+        next_turn_adv = 0.0
+        
+        for pos in reversed(reward_positions):
+            turn_reward = sample_rewards[pos].item()
+            turn_adv = turn_reward + gamma * next_turn_adv
+            turn_data.append((pos, turn_adv))
+            next_turn_adv = turn_adv
+        
+        turn_data.reverse()  # 变成从前到后的顺序
+        
+        # Step 3: 广播到每个 turn 的所有 tokens
+        # Turn i 的范围：[prev_reward_pos + 1, current_reward_pos]
+        # 第一个 turn 从位置 0 开始
+        prev_end = 0
+        for i, (reward_pos, adv) in enumerate(turn_data):
+            # Turn 范围：[prev_end, reward_pos]
+            # 只广播到 response_mask == 1 的位置
+            for t in range(prev_end, reward_pos + 1):
+                if sample_mask[t] == 1:
+                    discounted_returns[sample_idx, t] = adv
+            prev_end = reward_pos + 1
+        
+        # ========== 严格验证：记录 turn-level 结果 ==========
+        if strict_check:
+            record_turn_level_results(sample_idx, turn_data, discounted_returns)
+        
+        # ========== DEBUG: 验证单个样本 ==========
+        if debug_turn_level and sample_idx < 3:  # 只打印前 3 个样本
+            print(f"\n[Turn-Level DEBUG] === Sample {sample_idx} ===")
+            print(f"  Reward positions: {reward_positions}")
+            reward_values = [f"{sample_rewards[p].item():.4f}" for p in reward_positions]
+            print(f"  Reward values: {reward_values}")
+            print(f"  Gamma: {gamma}")
+            print(f"  Turn advantages (from turn-level discounting):")
+            for i, (pos, adv) in enumerate(turn_data):
+                print(f"    Turn {i}: pos={pos}, advantage={adv:.4f}")
+            
+            # 验证折扣累积公式
+            print(f"  Verification of discounting formula A_i = r_i + γ * A_{i+1}:")
+            for i in range(len(turn_data) - 1, -1, -1):
+                pos, adv = turn_data[i]
+                r_i = sample_rewards[pos].item()
+                if i == len(turn_data) - 1:
+                    expected = r_i
+                    print(f"    Turn {i}: A_{i} = r_{i} = {r_i:.4f}, actual={adv:.4f}, match={abs(expected - adv) < 1e-6}")
+                else:
+                    A_next = turn_data[i + 1][1]
+                    expected = r_i + gamma * A_next
+                    print(f"    Turn {i}: A_{i} = {r_i:.4f} + {gamma} * {A_next:.4f} = {expected:.4f}, actual={adv:.4f}, match={abs(expected - adv) < 1e-6}")
+    
+    # ========== DEBUG: 全局验证 ==========
+    if debug_turn_level:
+        print(f"\n[Turn-Level DEBUG] === Global Statistics ===")
+        print(f"  Total samples with rewards: {total_samples_with_rewards}/{bsz}")
+        print(f"  Total turns: {total_turns}")
+        print(f"  Average turns per sample: {total_turns / max(total_samples_with_rewards, 1):.2f}")
+        
+        # 验证：检查每个 turn 内的 tokens 是否都有相同的 advantage
+        uniform_count = 0
+        non_uniform_count = 0
+        
+        for sample_idx in range(bsz):
+            sample_rewards = normalized_rewards[sample_idx]
+            sample_returns = discounted_returns[sample_idx]
+            sample_mask = response_mask[sample_idx]
+            
+            reward_positions = (sample_rewards != 0).nonzero(as_tuple=True)[0].tolist()
+            if len(reward_positions) == 0:
+                continue
+            
+            prev_end = 0
+            sample_is_uniform = True
+            for pos in reward_positions:
+                # 检查 [prev_end, pos] 范围内的 advantage 是否一致
+                turn_values = []
+                for t in range(prev_end, pos + 1):
+                    if sample_mask[t] == 1:
+                        turn_values.append(sample_returns[t].item())
+                
+                if len(turn_values) > 1:
+                    # 检查是否所有值都相等
+                    if not all(abs(v - turn_values[0]) < 1e-6 for v in turn_values):
+                        sample_is_uniform = False
+                        break
+                
+                prev_end = pos + 1
+            
+            if sample_is_uniform:
+                uniform_count += 1
+            else:
+                non_uniform_count += 1
+        
+        print(f"  Samples with uniform turn advantages: {uniform_count}/{total_samples_with_rewards}")
+        if non_uniform_count > 0:
+            print(f"  ⚠️  WARNING: {non_uniform_count} samples have non-uniform advantages within turns!")
+        else:
+            print(f"  ✓ All samples have uniform advantages within each turn")
+    
+    return discounted_returns
+
 
 class AdaptiveKLController:
     """
@@ -122,7 +293,12 @@ def compute_grpo_outcome_advantage(
     curriculum_ig_weight: float = 1.0,
 ):
     """
-    为 GRPO 计算优势函数 (Advantage)，使用向量化实现提升性能。
+    为 GRPO 计算优势函数 (Advantage)，使用 Turn-level 累积 + 广播。
+    
+    计算流程：
+    1. 归一化 rewards（info_gain 和 f1）
+    2. Turn-level 折扣累积：A_i = r_i + gamma * A_{i+1}
+    3. 将每个 turn 的 advantage 广播到该 turn 的所有 tokens
     
     Args:
         token_level_rewards: (bs, response_length) 每个词元的即时奖励
@@ -138,8 +314,50 @@ def compute_grpo_outcome_advantage(
     Returns:
         advantages, returns: 均为 (bs, response_length)
     """
+    import os
+    debug_pipeline = os.environ.get("DEBUG_IGPO_PIPELINE", "0") == "1"
+    strict_check = _HAS_STRICT_CHECK and is_strict_check_enabled()
+    
     bsz, seq_len = token_level_rewards.shape
     device = token_level_rewards.device
+    
+    # 保存原始 rewards 用于验证
+    original_rewards = token_level_rewards.clone() if strict_check else None
+
+    # ========== 严格验证：记录接收到的 rewards ==========
+    if strict_check:
+        record_core_algos_rewards(token_level_rewards, response_mask)
+
+    # ========== DEBUG: 验证点 3 - Reward 传输正确性 ==========
+    if debug_pipeline:
+        print(f"\n[IGPO Pipeline Check 3] === core_algos.py: Reward Reception ===")
+        print(f"  Input shape: ({bsz}, {seq_len})")
+        
+        # 统计接收到的 rewards
+        nonzero_mask = token_level_rewards != 0
+        total_nonzero = nonzero_mask.sum().item()
+        samples_with_rewards = (nonzero_mask.sum(dim=1) > 0).sum().item()
+        
+        print(f"  Samples with rewards: {samples_with_rewards}/{bsz}")
+        print(f"  Total non-zero rewards: {total_nonzero}")
+        print(f"  Average rewards per sample: {total_nonzero / max(samples_with_rewards, 1):.2f}")
+        
+        # 打印前 3 个样本的详细信息
+        for i in range(min(3, bsz)):
+            sample_rewards = token_level_rewards[i]
+            reward_positions = (sample_rewards != 0).nonzero(as_tuple=True)[0].tolist()
+            reward_values = [f"{sample_rewards[p].item():.6f}" for p in reward_positions]
+            print(f"\n  Sample {i}:")
+            print(f"    Reward positions: {reward_positions}")
+            print(f"    Reward values: {reward_values}")
+            
+            # 分析 reward 类型（info_gain vs f1）
+            if len(reward_positions) > 0:
+                last_pos = reward_positions[-1]
+                valid_len = response_mask[i].sum().item()
+                is_last_f1 = (last_pos == valid_len - 1)
+                print(f"    Valid length: {int(valid_len)}, Last reward at: {last_pos}")
+                print(f"    Last reward is F1: {is_last_f1} {'✓' if is_last_f1 else '⚠️'}")
 
     # ========== Step 1: 构建掩码 ==========
     with torch.no_grad():
@@ -235,124 +453,85 @@ def compute_grpo_outcome_advantage(
             norm_val = norm_val / (std_map + epsilon)
         normalized_rewards = torch.where(joint_mask, norm_val, normalized_rewards)
 
-    # ========== Step 5: 折扣累积回报 ==========
-    if gamma == 1.0:
-        # gamma=1.0 时使用高效的 cumsum
-        discounted_returns = torch.flip(
-            torch.cumsum(torch.flip(normalized_rewards * response_mask, [1]), dim=1), 
-            [1]
-        ) * response_mask
-    else:
-        # gamma != 1.0 需要循环，但是张量级操作，O(SeqLen) 而非 O(BSZ*SeqLen)
-        discounted_returns = torch.zeros_like(normalized_rewards)
-        next_return = torch.zeros(bsz, device=device)
-        for t in reversed(range(seq_len)):
-            current_return = normalized_rewards[:, t] + gamma * next_return
-            discounted_returns[:, t] = current_return
-            next_return = current_return * response_mask[:, t]
-        discounted_returns = discounted_returns * response_mask
+    # ========== DEBUG: 验证点 4 - 标准化正确性 ==========
+    if debug_pipeline:
+        print(f"\n[IGPO Pipeline Check 4] === core_algos.py: Normalization ===")
+        print(f"  Normalization mode: {info_gain_norm_mode}")
+        print(f"  Norm by std: {norm_adv_by_std_in_grpo}")
+        print(f"  Number of groups: {num_groups}")
+        
+        # 统计归一化前后的 rewards
+        f1_count = f1_mask.sum().item()
+        ig_count = ig_mask.sum().item()
+        print(f"  F1 rewards count: {f1_count}")
+        print(f"  InfoGain rewards count: {ig_count}")
+        
+        # 验证归一化结果
+        if info_gain_norm_mode == "separate":
+            # 分别检查 F1 和 InfoGain
+            f1_values = token_level_rewards[f1_mask]
+            ig_values = token_level_rewards[ig_mask]
+            f1_norm_values = normalized_rewards[f1_mask]
+            ig_norm_values = normalized_rewards[ig_mask]
+            
+            if len(f1_values) > 0:
+                print(f"\n  F1 Rewards:")
+                print(f"    Before norm - mean: {f1_values.mean().item():.4f}, std: {f1_values.std().item():.4f}")
+                print(f"    After norm  - mean: {f1_norm_values.mean().item():.4f}, std: {f1_norm_values.std().item():.4f}")
+            
+            if len(ig_values) > 0:
+                print(f"\n  InfoGain Rewards:")
+                print(f"    Before norm - mean: {ig_values.mean().item():.4f}, std: {ig_values.std().item():.4f}")
+                print(f"    After norm  - mean: {ig_norm_values.mean().item():.4f}, std: {ig_norm_values.std().item():.4f}")
+        else:
+            # Joint
+            joint_values = token_level_rewards[joint_mask]
+            joint_norm_values = normalized_rewards[joint_mask]
+            
+            if len(joint_values) > 0:
+                print(f"\n  Joint (F1 + InfoGain) Rewards:")
+                print(f"    Before norm - mean: {joint_values.mean().item():.4f}, std: {joint_values.std().item():.4f}")
+                print(f"    After norm  - mean: {joint_norm_values.mean().item():.4f}, std: {joint_norm_values.std().item():.4f}")
+        
+        # 验证归一化后非零位置是否正确保留
+        nonzero_before = (token_level_rewards != 0).sum().item()
+        nonzero_after = (normalized_rewards != 0).sum().item()
+        print(f"\n  Non-zero count before norm: {nonzero_before}")
+        print(f"  Non-zero count after norm: {nonzero_after}")
+        print(f"  Positions preserved: {nonzero_before == nonzero_after} {'✓' if nonzero_before == nonzero_after else '⚠️'}")
 
-    # ========== DEBUG: 彻底验证 Bug 2 是否存在 ==========
-    with torch.no_grad():
-        # === Part 1: 检查 reward 放置位置 ===
-        nonzero_mask = token_level_rewards != 0
-        total_rewards = nonzero_mask.sum().item()
-        
-        rewards_at_valid_pos = (nonzero_mask & (response_mask == 1)).sum().item()
-        rewards_at_invalid_pos = (nonzero_mask & (response_mask == 0)).sum().item()
-        
-        f1_rewards = (nonzero_mask & f1_mask).sum().item()
-        ig_rewards_valid = (nonzero_mask & ig_mask).sum().item()
-        ig_rewards_at_invalid = (nonzero_mask & (response_mask == 0) & (~f1_mask)).sum().item()
-        
-        print(f"[Bug2 Check] === Reward Placement Analysis ===")
-        print(f"[Bug2 Check] Total non-zero rewards: {total_rewards}")
-        print(f"[Bug2 Check]   - At response_mask=1 (valid): {rewards_at_valid_pos}")
-        print(f"[Bug2 Check]   - At response_mask=0 (INVALID): {rewards_at_invalid_pos}")
-        print(f"[Bug2 Check] F1 rewards: {f1_rewards}, InfoGain valid: {ig_rewards_valid}, InfoGain LOST: {ig_rewards_at_invalid}")
-        
-        if ig_rewards_at_invalid > 0:
-            invalid_ratio = ig_rewards_at_invalid / max(ig_rewards_valid + ig_rewards_at_invalid, 1) * 100
-            print(f"[Bug2 Check] ⚠️  BUG 2 CONFIRMED: {invalid_ratio:.1f}% of info_gain rewards at response_mask=0!")
-        else:
-            print(f"[Bug2 Check] ✓  All info_gain rewards at valid positions")
-        
-        # === Part 2: 检查 reward 是否在每个 turn 的最后一个合法位置 ===
-        # 通过 response_mask 的边界变化识别 turn 边界
-        # turn 结束位置 = response_mask 从 1 变到 0 的位置，或序列最后一个 1 的位置
-        rewards_at_turn_end = 0
-        rewards_not_at_turn_end = 0
-        total_turns_detected = 0
-        
-        for sample_idx in range(bsz):
-            sample_mask = response_mask[sample_idx]  # (seq_len,)
-            sample_rewards = token_level_rewards[sample_idx]  # (seq_len,)
-            
-            # 找到所有 turn 的最后一个合法位置
-            # turn 结束 = mask 从 1 变到 0 的前一个位置，或最后一个 1
-            turn_end_positions = []
-            
-            for t in range(seq_len):
-                if sample_mask[t] == 1:
-                    # 检查是否是这个 "1 序列" 的最后一个
-                    is_last_in_segment = (t == seq_len - 1) or (sample_mask[t + 1] == 0)
-                    if is_last_in_segment:
-                        turn_end_positions.append(t)
-            
-            total_turns_detected += len(turn_end_positions)
-            
-            # 检查 reward 位置
-            reward_positions = (sample_rewards != 0).nonzero(as_tuple=True)[0].tolist()
-            
-            for pos in reward_positions:
-                if pos in turn_end_positions:
-                    rewards_at_turn_end += 1
-                else:
-                    rewards_not_at_turn_end += 1
-        
-        print(f"[Bug2 Check] === Turn Boundary Analysis ===")
-        print(f"[Bug2 Check] Total turns detected (response_mask segments): {total_turns_detected}")
-        print(f"[Bug2 Check] Rewards at turn end positions: {rewards_at_turn_end}")
-        print(f"[Bug2 Check] Rewards NOT at turn end positions: {rewards_not_at_turn_end}")
-        
-        if rewards_not_at_turn_end > 0:
-            misplaced_ratio = rewards_not_at_turn_end / max(total_rewards, 1) * 100
-            print(f"[Bug2 Check] ⚠️  WARNING: {misplaced_ratio:.1f}% rewards not at turn boundaries!")
-        else:
-            print(f"[Bug2 Check] ✓  All rewards correctly placed at turn end positions")
-        
-        # === Part 3: 检查 discounted_returns 是否均匀 ===
-        all_equal_count = 0
-        varied_count = 0
-        single_token_count = 0
-        
-        for sample_idx in range(bsz):
-            mask = response_mask[sample_idx] == 1
-            valid_count = mask.sum().item()
-            
-            if valid_count <= 1:
-                single_token_count += 1
-                continue
-                
-            valid_values = discounted_returns[sample_idx][mask]
-            unique_values = torch.unique(valid_values)
-            
-            if len(unique_values) == 1:
-                all_equal_count += 1
-            else:
-                varied_count += 1
-        
-        total_checked = all_equal_count + varied_count
-        if total_checked > 0:
-            equal_ratio = all_equal_count / total_checked * 100
-            print(f"[Bug2 Check] === Discounted Returns Analysis ===")
-            print(f"[Bug2 Check] ALL_EQUAL: {all_equal_count} ({equal_ratio:.1f}%), VARIED: {varied_count} ({100-equal_ratio:.1f}%)")
-            
-            if equal_ratio > 90:
-                print(f"[Bug2 Check] ⚠️  WARNING: Info gain rewards NOT contributing!")
-            else:
-                print(f"[Bug2 Check] ✓  Info gain rewards contributing normally.")
-    # ========== END DEBUG ==========
+    # ========== 严格验证：记录归一化统计 ==========
+    if strict_check and original_rewards is not None:
+        record_normalization_stats(
+            before_rewards=original_rewards,
+            after_rewards=normalized_rewards,
+            f1_mask=f1_mask,
+            ig_mask=ig_mask,
+            mode=info_gain_norm_mode,
+            group_ids=group_ids,
+        )
+
+    # ========== Step 5: Turn-level 折扣累积 + 广播 ==========
+    # 每个 turn 的 advantage 通过 turn-level 折扣累积计算
+    # 然后广播到该 turn 的所有 tokens
+    discounted_returns = _compute_turn_level_advantage(
+        normalized_rewards=normalized_rewards,
+        response_mask=response_mask,
+        gamma=gamma,
+        bsz=bsz,
+        seq_len=seq_len,
+        device=device,
+    )
+
+    # ========== 严格验证：运行所有检查 ==========
+    if strict_check:
+        run_all_checks(
+            gamma=gamma,
+            norm_mode=info_gain_norm_mode,
+            norm_by_std=norm_adv_by_std_in_grpo,
+            response_mask=response_mask,
+            normalized_rewards=normalized_rewards,
+        )
 
     return discounted_returns, discounted_returns
 

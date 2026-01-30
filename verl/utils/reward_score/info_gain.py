@@ -3,6 +3,18 @@ import re
 import difflib
 import string
 import json
+import os
+
+# 导入严格验证模块
+try:
+    from verl.utils.debug.igpo_pipeline_checker import (
+        is_strict_check_enabled,
+        record_info_gain_assignment,
+    )
+    _HAS_STRICT_CHECK = True
+except ImportError:
+    _HAS_STRICT_CHECK = False
+    def is_strict_check_enabled(): return False
 
 def check_tags_balance(solution_str: str) -> bool:
     """检查标签是否正确配对
@@ -177,6 +189,9 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
     Returns:
         scores 列表或包含多个指标的字典
     """
+    import os
+    debug_pipeline = os.environ.get("DEBUG_IGPO_PIPELINE", "0") == "1"
+    
     if tokenizer is None:
         raise ValueError("tokenizer cannot be None")
         
@@ -261,19 +276,8 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
             return {"f1": f1_score, "em": em_score, "noformatf1": noformatf1_score, "scores": scores}
         return scores
 
-    # ========== DEBUG: 打印第一个样本的详细信息 ==========
-    import os
-    debug_info_gain = os.environ.get("DEBUG_INFO_GAIN", "0") == "1"
-    if debug_info_gain:
-        print(f"\n[info_gain DEBUG] === Sample Analysis ===")
-        print(f"[info_gain DEBUG] solution_str length: {len(solution_str)}")
-        print(f"[info_gain DEBUG] tokens_size: {tokens_size}")
-        print(f"[info_gain DEBUG] chats_size (turns): {chats_size}")
-        print(f"[info_gain DEBUG] info_gain_reward: {info_gain_reward}")
-        print(f"[info_gain DEBUG] separator: {repr(separator)}")
-        print(f"[info_gain DEBUG] sep_positions: {sep_positions[:5]}..." if len(sep_positions) > 5 else f"[info_gain DEBUG] sep_positions: {sep_positions}")
-        print(f"[info_gain DEBUG] turn_start_positions: {turn_start_positions}")
-        print(f"[info_gain DEBUG] turn_end_positions: {turn_end_positions}")
+    # ========== DEBUG: 验证点 1 & 2 - info_gain_reward 计算和分配 ==========
+    reward_assignments = []  # 用于记录奖励分配信息
     
     # 为每个 turn 的最后一个 token 分配奖励
     for i in range(chats_size):
@@ -289,39 +293,89 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         # 确保索引在有效范围内
         last_token_idx = min(last_token_idx, tokens_size - 1)
         
-        # ========== DEBUG: 打印每个 turn 的详细映射 ==========
-        if debug_info_gain:
-            char_pos = turn_end_char - 1 if turn_end_char > 0 else 0
-            # 获取该位置附近的字符（前后各 20 个字符）
-            context_start = max(0, char_pos - 20)
-            context_end = min(len(solution_str), char_pos + 20)
-            context = solution_str[context_start:context_end]
-            char_at_pos = solution_str[char_pos] if char_pos < len(solution_str) else "EOF"
-            
-            # 获取该 token 的 offset 范围和对应文本
-            if last_token_idx < len(offset_mapping):
-                token_start, token_end = offset_mapping[last_token_idx]
-                token_text = solution_str[token_start:token_end] if token_end <= len(solution_str) else "?"
-            else:
-                token_start, token_end = -1, -1
-                token_text = "?"
-            
-            reward_type = "info_gain" if i < chats_size - 1 else "F1"
-            reward_value = info_gain_reward[i] if i < chats_size - 1 else f1_score
-            
-            print(f"[info_gain DEBUG] Turn {i}: char_pos={char_pos}, char='{repr(char_at_pos)}', token_idx={last_token_idx}")
-            print(f"[info_gain DEBUG]   token offset: ({token_start}, {token_end}), token_text: {repr(token_text)}")
-            print(f"[info_gain DEBUG]   context: ...{repr(context)}...")
-            print(f"[info_gain DEBUG]   reward: {reward_type}={reward_value:.6f}")
-        
         # 分配奖励
         if i < chats_size - 1:
             ig_value = info_gain_reward[i]
             if ig_value == 0.0:
                 ig_value = 1e-10  # 避免被 !=0 检查跳过
             scores[last_token_idx] = ig_value
+            reward_assignments.append({
+                'turn': i,
+                'type': 'info_gain',
+                'value': ig_value,
+                'token_idx': last_token_idx,
+                'turn_range': (turn_start_positions[i], turn_end_positions[i]),
+            })
         else:
             scores[last_token_idx] = alpha * f1_score
+            reward_assignments.append({
+                'turn': i,
+                'type': 'f1',
+                'value': alpha * f1_score,
+                'token_idx': last_token_idx,
+                'turn_range': (turn_start_positions[i], turn_end_positions[i]),
+            })
+    
+    # ========== DEBUG 输出 ==========
+    if debug_pipeline:
+        print(f"\n[IGPO Pipeline Check 1 & 2] === info_gain.py: Reward Assignment ===")
+        print(f"  Solution length: {len(solution_str)} chars, {tokens_size} tokens")
+        print(f"  Total turns: {chats_size}")
+        print(f"  Input info_gain_reward: {info_gain_reward}")
+        print(f"  F1 score: {f1_score:.4f}")
+        print(f"\n  Reward Assignments:")
+        for ra in reward_assignments:
+            turn_content_preview = solution_str[ra['turn_range'][0]:min(ra['turn_range'][0]+50, ra['turn_range'][1])]
+            turn_end_preview = solution_str[max(0, ra['turn_range'][1]-30):ra['turn_range'][1]]
+            print(f"    Turn {ra['turn']} ({ra['type']}): value={ra['value']:.6f}, token_idx={ra['token_idx']}")
+            print(f"      Turn range: chars [{ra['turn_range'][0]}, {ra['turn_range'][1]})")
+            print(f"      Turn start: '{turn_content_preview}...'")
+            print(f"      Turn end:   '...{turn_end_preview}'")
+            
+            # 验证 token 位置是否在 turn 范围内
+            if ra['token_idx'] < len(offset_mapping):
+                token_char_start, token_char_end = offset_mapping[ra['token_idx']]
+                token_text = solution_str[token_char_start:token_char_end]
+                in_range = ra['turn_range'][0] <= token_char_start < ra['turn_range'][1]
+                print(f"      Token at idx {ra['token_idx']}: chars [{token_char_start}, {token_char_end}), text='{token_text}'")
+                print(f"      Token in turn range: {in_range} {'✓' if in_range else '⚠️ WARNING: Token outside turn range!'}")
+        
+        # 统计非零 scores 数量
+        nonzero_count = sum(1 for s in scores if s != 0)
+        print(f"\n  Verification:")
+        print(f"    Non-zero scores: {nonzero_count}")
+        print(f"    Expected non-zero: {chats_size} (= {chats_size - 1} info_gain + 1 f1)")
+        print(f"    Match: {nonzero_count == chats_size} {'✓' if nonzero_count == chats_size else '⚠️ MISMATCH!'}")
+    
+    # ========== 严格验证：记录分配信息 ==========
+    strict_check = _HAS_STRICT_CHECK and is_strict_check_enabled()
+    if strict_check:
+        # 从 reward_assignments 中提取信息
+        ig_rewards = []
+        ig_positions = []
+        f1_score_final = 0.0
+        f1_position = -1
+        
+        for ra in reward_assignments:
+            if ra['type'] == 'info_gain':
+                ig_rewards.append(ra['value'])
+                ig_positions.append(ra['token_idx'])
+            else:  # f1
+                f1_score_final = ra['value']
+                f1_position = ra['token_idx']
+        
+        # 使用 data_source 或序号作为 sample_idx
+        # 注意：这里无法直接获取 sample_idx，使用静态计数器
+        sample_idx = getattr(compute_score, '_sample_counter', 0)
+        compute_score._sample_counter = sample_idx + 1
+        
+        record_info_gain_assignment(
+            sample_idx=sample_idx,
+            info_gain_rewards=ig_rewards,
+            info_gain_positions=ig_positions,
+            f1_score=f1_score_final,
+            f1_position=f1_position,
+        )
     
     if is_validation:
         return {"f1": f1_score, "em": em_score, "noformatf1": noformatf1_score, "scores": scores}

@@ -26,6 +26,21 @@ from scrl.llm_agent.vectorized_gt_logprob import (
     VectorizedGTLogProbComputer,
 )
 import math
+
+# 导入严格验证模块
+try:
+    from verl.utils.debug.igpo_pipeline_checker import (
+        is_strict_check_enabled,
+        record_generation_info_gain,
+        verify_vectorized_vs_sequential,
+        reset_checkpoint,
+        save_results_for_comparison,
+    )
+    _HAS_STRICT_CHECK = True
+except ImportError:
+    _HAS_STRICT_CHECK = False
+    def is_strict_check_enabled(): return False
+    def save_results_for_comparison(mode): pass
 from dataclasses import dataclass
 from tensordict import TensorDict
 from scrl.llm_agent.tensor_helper import TensorHelper, TensorConfig
@@ -817,6 +832,35 @@ class LLMGenerationManager:
         print("generation结束")
 
         print(f"node {node_rank} message_string_list {len(message_string_list)}")
+
+        # ========== 严格验证：记录 generation 阶段的 info_gain_rewards ==========
+        strict_check = _HAS_STRICT_CHECK and is_strict_check_enabled()
+        if strict_check:
+            # 重置 checkpoint
+            reset_checkpoint()
+            # 重置 info_gain.py 中的样本计数器
+            try:
+                from verl.utils.reward_score.info_gain import compute_score
+                compute_score._sample_counter = 0
+            except:
+                pass
+            
+            mode = "vectorized" if is_vectorized_enabled() else "sequential"
+            for i, rewards in enumerate(info_gain_rewards):
+                if len(rewards) > 0:
+                    record_generation_info_gain(
+                        sample_idx=i,
+                        info_gain_rewards=rewards,
+                        mode=mode,
+                    )
+            
+            print(f"\n[IGPO Strict Check] Generation phase completed:")
+            print(f"  Mode: {mode}")
+            print(f"  Samples with rewards: {sum(1 for r in info_gain_rewards if len(r) > 0)}/{len(info_gain_rewards)}")
+            print(f"  Total info_gain values: {sum(len(r) for r in info_gain_rewards)}")
+            
+            # 保存结果用于向量化 vs 顺序对比
+            save_results_for_comparison(mode)
 
         return message_string_list, message_tensor, info_gain_rewards
     
