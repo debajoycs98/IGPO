@@ -620,18 +620,24 @@ class LLMGenerationManager:
                     print(f"[DEBUG step=0] pseudo_gen_output responses shape: {pseudo_gen_output.batch['responses'].shape}")
                     print(f"[DEBUG step=0] ===============================")
                     
+                    # Statistics counters for debug summary
+                    skip_gt_idx_oob = 0
+                    skip_logprobs_oob = 0
+                    skip_empty_range = 0
+                    skip_nan_inf = 0
+                    
                     for i in activate_list:
                         # Check if index is out of bounds for gt_idx
                         if i >= len(gt_idx):
-                            print(f"[DEBUG step=0] ERROR: sample {i} >= gt_idx length {len(gt_idx)}, SKIPPING")
+                            skip_gt_idx_oob += 1
                             continue
                         # Check if index is out of bounds for old_log_probs
                         if i >= old_log_probs_shape[0]:
-                            print(f"[DEBUG step=0] ERROR: sample {i} >= old_log_probs dim0 {old_log_probs_shape[0]}, SKIPPING")
+                            skip_logprobs_oob += 1
                             continue
                         # Check if gt_idx range is valid
                         if gt_idx[i][0] >= gt_idx[i][1]:
-                            # Empty range, skip (keep gt_values[i] at initial value)
+                            skip_empty_range += 1
                             continue
                         log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
                         
@@ -645,7 +651,7 @@ class LLMGenerationManager:
                         
                         # Skip if mean_log_prob is nan or inf
                         if math.isnan(mean_log_prob) or math.isinf(mean_log_prob):
-                            print(f"[DEBUG step=0] Skipping sample {i}: mean_log_prob is nan/inf ({mean_log_prob})")
+                            skip_nan_inf += 1
                             continue
                         
                         if info_gain_type == "log_prob_diff":
@@ -657,6 +663,21 @@ class LLMGenerationManager:
                         
                         gt_log_probs_per_turn[i].append(log_probs.tolist())
                         gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())
+                    
+                    # Print summary statistics instead of per-sample messages
+                    total_skipped = skip_gt_idx_oob + skip_logprobs_oob + skip_empty_range + skip_nan_inf
+                    if total_skipped > 0:
+                        print(f"[DEBUG step=0] ===== Skip Statistics =====")
+                        print(f"[DEBUG step=0] Total samples: {len(activate_list)}, Skipped: {total_skipped}, Processed: {len(activate_list) - total_skipped}")
+                        if skip_gt_idx_oob > 0:
+                            print(f"[DEBUG step=0]   - gt_idx out of bounds: {skip_gt_idx_oob}")
+                        if skip_logprobs_oob > 0:
+                            print(f"[DEBUG step=0]   - log_probs out of bounds: {skip_logprobs_oob}")
+                        if skip_empty_range > 0:
+                            print(f"[DEBUG step=0]   - empty gt_idx range: {skip_empty_range}")
+                        if skip_nan_inf > 0:
+                            print(f"[DEBUG step=0]   - nan/inf mean_log_prob: {skip_nan_inf}")
+                        print(f"[DEBUG step=0] ===========================")
                 else:
                     for i in activate_list:
                         # Check if gt_idx range is valid
@@ -875,8 +896,9 @@ class LLMGenerationManager:
                             # Check if gt_idx range is valid
                             if gt_idx[global_idx][0] >= gt_idx[global_idx][1]:
                                 continue
-                            # NOTE: Use global_idx (not local_idx) because turn_old_log_probs contains ALL samples
-                            log_probs = turn_old_log_probs[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
+                            # CRITICAL FIX: Use local_idx (not global_idx) because turn_old_log_probs only contains 
+                            # active samples for this turn, with shape [len(activate_list_for_turn), response_len]
+                            log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
                             
                             # Skip if mean_log_prob is nan or inf
@@ -889,7 +911,7 @@ class LLMGenerationManager:
                                 gt_values[global_idx] = torch.exp(torch.tensor(mean_log_prob)).item()
                             
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
-                            gt_entropys_per_turn[global_idx].append(turn_entropys[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
+                            gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
                     else:
                         # Subsequent turns: compute info_gain
                         for local_idx, global_idx in enumerate(activate_list_for_turn):
@@ -899,8 +921,9 @@ class LLMGenerationManager:
                             # Check if gt_values was initialized in turn 0, skip if not to avoid KeyError/nan
                             if global_idx not in gt_values:
                                 continue
-                            # NOTE: Use global_idx (not local_idx) because turn_old_log_probs contains ALL samples
-                            log_probs = turn_old_log_probs[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
+                            # CRITICAL FIX: Use local_idx (not global_idx) because turn_old_log_probs only contains 
+                            # active samples for this turn, with shape [len(activate_list_for_turn), response_len]
+                            log_probs = turn_old_log_probs[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]]
                             mean_log_prob = log_probs.mean().item()
                             
                             # Check for nan in mean_log_prob
@@ -922,7 +945,8 @@ class LLMGenerationManager:
                             gt_values[global_idx] = cur_value
                             
                             gt_log_probs_per_turn[global_idx].append(log_probs.tolist())
-                            gt_entropys_per_turn[global_idx].append(turn_entropys[global_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
+                            # CRITICAL FIX: Use local_idx for turn_entropys indexing
+                            gt_entropys_per_turn[global_idx].append(turn_entropys[local_idx, gt_idx[global_idx][0]:gt_idx[global_idx][1]].tolist())
         
                 # Statistics and print results
                 total_info_gains = sum(len(r) for r in info_gain_rewards)
