@@ -830,11 +830,13 @@ class LLMGenerationManager:
                 
                 gt_idx = vectorized_data_collector['gt_idx']
                 
-                # Step 1: Collect all turns' data and find max_response_len
+                # Step 1: Collect all turns' data
+                # Note: pseudo_generate_sequences already pads responses to max_length=2000
+                # So all turns have the same response length, no need to reconstruct
                 all_input_ids = []
                 all_attention_mask = []
+                all_position_ids = []
                 all_responses = []
-                all_prompts = []
                 turn_batch_sizes = []
                 turn_response_lengths = []
                 
@@ -843,78 +845,50 @@ class LLMGenerationManager:
                     turn_batch_sizes.append(batch_size)
                     all_input_ids.append(pseudo_output.batch['input_ids'])
                     all_attention_mask.append(pseudo_output.batch['attention_mask'])
+                    all_position_ids.append(pseudo_output.batch['position_ids'])
                     all_responses.append(pseudo_output.batch['responses'])
-                    all_prompts.append(pseudo_output.batch['prompts'])
                     turn_response_lengths.append(pseudo_output.batch['responses'].shape[1])
                 
                 max_response_len = max(turn_response_lengths)
+                max_seq_len = max(t.shape[1] for t in all_input_ids)
                 
-                # Step 2: Reconstruct input_ids with uniform response length
-                reconstructed_input_ids = []
-                reconstructed_attention_mask = []
-                reconstructed_responses = []
-                
-                for i in range(len(all_input_ids)):
-                    curr_input_ids = all_input_ids[i]
-                    curr_attention_mask = all_attention_mask[i]
-                    curr_responses = all_responses[i]
-                    curr_prompts = all_prompts[i]
-                    curr_resp_len = turn_response_lengths[i]
-                    
-                    # Calculate how much response padding is needed
-                    resp_pad_len = max_response_len - curr_resp_len
-                    
-                    if resp_pad_len > 0:
-                        # Pad response to max_response_len (right padding)
-                        padded_responses = F.pad(curr_responses, (0, resp_pad_len), value=self.tokenizer.pad_token_id)
-                        
-                        # Reconstruct input_ids: [prompt][response_padded]
-                        # The prompt part is input_ids[:, :-curr_resp_len]
-                        # We rebuild by concatenating prompt + padded_response
-                        prompt_part = curr_input_ids[:, :-curr_resp_len]
-                        new_input_ids = torch.cat([prompt_part, padded_responses], dim=1)
-                        
-                        # Reconstruct attention_mask similarly
-                        prompt_attn = curr_attention_mask[:, :-curr_resp_len]
-                        # Response padding should have attention_mask = 0
-                        padded_resp_attn = F.pad(curr_attention_mask[:, -curr_resp_len:], (0, resp_pad_len), value=0)
-                        new_attention_mask = torch.cat([prompt_attn, padded_resp_attn], dim=1)
-                        
-                        reconstructed_input_ids.append(new_input_ids)
-                        reconstructed_attention_mask.append(new_attention_mask)
-                        reconstructed_responses.append(padded_responses)
-                    else:
-                        # No padding needed, use original
-                        reconstructed_input_ids.append(curr_input_ids)
-                        reconstructed_attention_mask.append(curr_attention_mask)
-                        reconstructed_responses.append(curr_responses)
-                
-                # Step 3: Find max_seq_len (after response reconstruction)
-                max_seq_len = max(t.shape[1] for t in reconstructed_input_ids)
-                
-                # Step 4: Apply LEFT padding to input_ids and attention_mask
+                # Step 2: Apply LEFT padding to input_ids, attention_mask, and position_ids
+                # CRITICAL: Use original position_ids and apply left padding correctly
+                # position_ids for PAD tokens should be 0 (will be ignored due to attention_mask=0)
                 padded_input_ids = []
                 padded_attention_mask = []
+                padded_position_ids = []
+                padded_responses = []
                 
-                for i in range(len(reconstructed_input_ids)):
-                    curr_seq_len = reconstructed_input_ids[i].shape[1]
+                for i in range(len(all_input_ids)):
+                    curr_seq_len = all_input_ids[i].shape[1]
+                    curr_resp_len = turn_response_lengths[i]
                     left_pad_len = max_seq_len - curr_seq_len
                     
                     if left_pad_len > 0:
-                        padded_input_ids.append(F.pad(reconstructed_input_ids[i], (left_pad_len, 0), value=self.tokenizer.pad_token_id))
-                        padded_attention_mask.append(F.pad(reconstructed_attention_mask[i], (left_pad_len, 0), value=0))
+                        # Left padding for input_ids
+                        padded_input_ids.append(F.pad(all_input_ids[i], (left_pad_len, 0), value=self.tokenizer.pad_token_id))
+                        # Left padding for attention_mask (PAD = 0)
+                        padded_attention_mask.append(F.pad(all_attention_mask[i], (left_pad_len, 0), value=0))
+                        # Left padding for position_ids (PAD = 0, will be ignored)
+                        padded_position_ids.append(F.pad(all_position_ids[i], (left_pad_len, 0), value=0))
                     else:
-                        padded_input_ids.append(reconstructed_input_ids[i])
-                        padded_attention_mask.append(reconstructed_attention_mask[i])
+                        padded_input_ids.append(all_input_ids[i])
+                        padded_attention_mask.append(all_attention_mask[i])
+                        padded_position_ids.append(all_position_ids[i])
+                    
+                    # Responses: right padding to max_response_len (if needed)
+                    resp_pad_len = max_response_len - curr_resp_len
+                    if resp_pad_len > 0:
+                        padded_responses.append(F.pad(all_responses[i], (0, resp_pad_len), value=self.tokenizer.pad_token_id))
+                    else:
+                        padded_responses.append(all_responses[i])
                 
-                # Step 5: Merge into one large batch
+                # Step 3: Merge into one large batch
                 merged_input_ids = torch.cat(padded_input_ids, dim=0)
                 merged_attention_mask = torch.cat(padded_attention_mask, dim=0)
-                merged_responses = torch.cat(reconstructed_responses, dim=0)
-                
-                # Recompute position_ids based on attention_mask
-                merged_position_ids = merged_attention_mask.cumsum(dim=1) - 1
-                merged_position_ids = merged_position_ids.clamp(min=0)
+                merged_position_ids = torch.cat(padded_position_ids, dim=0)
+                merged_responses = torch.cat(padded_responses, dim=0)
                 
                 # Compute prompts (everything except the last max_response_len tokens)
                 prompt_len = max_seq_len - max_response_len
@@ -929,7 +903,7 @@ class LLMGenerationManager:
                 })
                 
                 total_samples = merged_input_ids.shape[0]
-                print(f"[IGPO] Vectorized (RESTRUCTURED): Merged {num_turns_collected} turns, batch={total_samples}, seq_len={max_seq_len}, resp_len={max_response_len}")
+                print(f"[IGPO] Vectorized (LEFT PADDING): Merged {num_turns_collected} turns, batch={total_samples}, seq_len={max_seq_len}, resp_len={max_response_len}")
                 print(f"[IGPO] Turn response lengths: {turn_response_lengths}")
                 
                 # Call compute_log_prob ONCE for all turns
