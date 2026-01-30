@@ -307,8 +307,7 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         scores[-1] = alpha * f1_score
         
         # 即使没有 info_gain，也需要记录验证数据
-        if strict_check:
-            sample_idx = getattr(compute_score, '_sample_counter', 0)
+        if full_check:
             compute_score._sample_counter = sample_idx + 1
             record_info_gain_assignment(
                 sample_idx=sample_idx,
@@ -329,8 +328,7 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         scores[-1] = alpha * f1_score
         
         # 即使 turn mismatch，也需要记录验证数据
-        if strict_check:
-            sample_idx = getattr(compute_score, '_sample_counter', 0)
+        if full_check:
             compute_score._sample_counter = sample_idx + 1
             record_info_gain_assignment(
                 sample_idx=sample_idx,
