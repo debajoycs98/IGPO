@@ -16,6 +16,17 @@ except ImportError:
     _HAS_STRICT_CHECK = False
     def is_strict_check_enabled(): return False
 
+# 导入完整验证模块
+try:
+    from verl.utils.debug.igpo_full_checker import (
+        is_full_check_enabled,
+        get_full_checker,
+    )
+    _HAS_FULL_CHECK = True
+except ImportError:
+    _HAS_FULL_CHECK = False
+    def is_full_check_enabled(): return False
+
 def check_tags_balance(solution_str: str) -> bool:
     """检查标签是否正确配对
     
@@ -259,6 +270,37 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
             turn_end_positions.append(turn_end)
     
     chats_size = len(turn_start_positions)
+    
+    # ========== 完整验证：记录 Turn 边界 ==========
+    full_check = _HAS_FULL_CHECK and is_full_check_enabled()
+    if full_check:
+        checker = get_full_checker()
+        sample_idx = getattr(compute_score, '_sample_counter', 0)
+        
+        # 记录字符级别的 turn 边界
+        char_boundaries = [(turn_start_positions[i], turn_end_positions[i]) for i in range(chats_size)]
+        
+        # 计算预期的 token 位置（每个 turn 的最后一个 token）
+        expected_positions = []
+        for i in range(chats_size):
+            turn_end_char = turn_end_positions[i]
+            if turn_end_char > 0:
+                expected_pos = _char_pos_to_token_idx(turn_end_char - 1, offset_mapping)
+            else:
+                expected_pos = 0
+            expected_pos = min(expected_pos, tokens_size - 1)
+            expected_positions.append(expected_pos)
+        
+        # Token 边界（基于 offset_mapping）
+        token_boundaries = []
+        for i in range(chats_size):
+            start_char = turn_start_positions[i]
+            end_char = turn_end_positions[i]
+            start_token = _char_pos_to_token_idx(start_char, offset_mapping)
+            end_token = _char_pos_to_token_idx(end_char - 1, offset_mapping) if end_char > 0 else 0
+            token_boundaries.append((start_token, end_token))
+        
+        checker.record_turn_boundaries(sample_idx, char_boundaries, token_boundaries)
 
     # 如果没有 info_gain_reward 或只有一个 turn，只在最后一个 token 放 f1_score
     if info_gain_reward == [] or chats_size == 1:
@@ -315,6 +357,18 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
                 'token_idx': last_token_idx,
                 'turn_range': (turn_start_positions[i], turn_end_positions[i]),
             })
+    
+    # ========== 完整验证：记录实际的 Token 位置 ==========
+    if full_check:
+        actual_positions = [ra['token_idx'] for ra in reward_assignments]
+        # expected_positions 已在前面计算
+        checker.record_reward_positions(sample_idx, actual_positions, expected_positions)
+        
+        # 记录 rewards 用于传输验证
+        ig_rewards = [ra['value'] for ra in reward_assignments if ra['type'] == 'info_gain']
+        f1_value = [ra['value'] for ra in reward_assignments if ra['type'] == 'f1']
+        all_rewards = ig_rewards + f1_value
+        checker.rewards_at_info_gain[sample_idx] = all_rewards
     
     # ========== DEBUG 输出 ==========
     if debug_pipeline:

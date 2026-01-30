@@ -39,6 +39,17 @@ except ImportError:
     _HAS_STRICT_CHECK = False
     def is_strict_check_enabled(): return False
 
+# 导入完整验证模块
+try:
+    from verl.utils.debug.igpo_full_checker import (
+        is_full_check_enabled,
+        get_full_checker,
+    )
+    _HAS_FULL_CHECK = True
+except ImportError:
+    _HAS_FULL_CHECK = False
+    def is_full_check_enabled(): return False
+
 
 def _compute_turn_level_advantage(
     normalized_rewards: torch.Tensor,
@@ -121,6 +132,16 @@ def _compute_turn_level_advantage(
         # ========== 严格验证：记录 turn-level 结果（只记录 turn_data）==========
         if strict_check:
             record_turn_level_results(sample_idx, turn_data)
+        
+        # ========== 完整验证：记录 Turn-level 计算过程 ==========
+        full_check = _HAS_FULL_CHECK and is_full_check_enabled()
+        if full_check:
+            checker = get_full_checker()
+            turn_rewards = [sample_rewards[pos].item() for pos, _ in turn_data]
+            turn_advs = [adv for _, adv in turn_data]
+            # Token advantages（仅记录有效位置的一部分）
+            token_advs = discounted_returns[sample_idx, :min(100, seq_len)].tolist()
+            checker.record_turn_level_computation(sample_idx, turn_rewards, turn_advs, token_advs)
         
         # ========== DEBUG: 验证单个样本 ==========
         if debug_turn_level and sample_idx < 3:  # 只打印前 3 个样本
@@ -537,6 +558,15 @@ def compute_grpo_outcome_advantage(
             normalized_rewards=normalized_rewards,
         )
 
+    # ========== 完整验证：运行所有验证并输出报告 ==========
+    full_check = _HAS_FULL_CHECK and is_full_check_enabled()
+    if full_check:
+        checker = get_full_checker()
+        # 记录归一化前后的数据
+        checker.record_normalization(token_level_rewards, normalized_rewards)
+        # 运行完整验证
+        checker.verify_all(gamma=gamma)
+
     return discounted_returns, discounted_returns
 
 
@@ -901,6 +931,12 @@ def compute_policy_loss(
     """
     assert clip_ratio_c > 1.0, "The lower bound of the clip_ratio_c for dual-clip PPO should be greater than 1.0," + f" but get the value: {clip_ratio_c}."
 
+    # ========== 完整验证：记录 Loss 输入 ==========
+    full_check = _HAS_FULL_CHECK and is_full_check_enabled()
+    if full_check:
+        checker = get_full_checker()
+        checker.record_loss_inputs(advantages, log_prob, old_log_prob, response_mask)
+
     negative_approx_kl = log_prob - old_log_prob
     ratio = torch.exp(negative_approx_kl)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
@@ -920,6 +956,27 @@ def compute_policy_loss(
 
     pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
     pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+    # ========== 完整验证：记录 Loss 输出 + Info Gain 贡献 ==========
+    if full_check:
+        checker.record_loss_output(pg_loss.item(), pg_losses)
+        
+        # 计算去除 Info Gain 后的 Loss，验证 IG 是否贡献了梯度
+        # 将非 F1 位置的 advantage 设为 0
+        if hasattr(checker, 'f1_mask') and checker.f1_mask is not None:
+            adv_without_ig = advantages.clone()
+            ig_mask = ~checker.f1_mask & (response_mask == 1)
+            adv_without_ig[ig_mask] = 0.0
+            
+            pg_losses1_no_ig = -adv_without_ig * ratio
+            pg_losses2_no_ig = -adv_without_ig * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+            clip_pg_losses1_no_ig = torch.maximum(pg_losses1_no_ig, pg_losses2_no_ig)
+            pg_losses3_no_ig = -adv_without_ig * clip_ratio_c
+            clip_pg_losses2_no_ig = torch.min(pg_losses3_no_ig, clip_pg_losses1_no_ig)
+            pg_losses_no_ig = torch.where(adv_without_ig < 0, clip_pg_losses2_no_ig, clip_pg_losses1_no_ig)
+            pg_loss_no_ig = agg_loss(loss_mat=pg_losses_no_ig, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+            
+            checker.record_ig_contribution(pg_loss.item(), pg_loss_no_ig.item())
 
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 

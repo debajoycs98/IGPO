@@ -41,6 +41,18 @@ except ImportError:
     _HAS_STRICT_CHECK = False
     def is_strict_check_enabled(): return False
     def save_results_for_comparison(mode): pass
+
+# 导入完整验证模块
+try:
+    from verl.utils.debug.igpo_full_checker import (
+        is_full_check_enabled,
+        get_full_checker,
+        reset_full_checker,
+    )
+    _HAS_FULL_CHECK = True
+except ImportError:
+    _HAS_FULL_CHECK = False
+    def is_full_check_enabled(): return False
 from dataclasses import dataclass
 from tensordict import TensorDict
 from scrl.llm_agent.tensor_helper import TensorHelper, TensorConfig
@@ -557,6 +569,8 @@ class LLMGenerationManager:
                         log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
                         mean_log_prob = log_probs.mean().item()
                         
+                        prev_value = gt_values[i]  # 保存前一个值用于验证
+                        
                         if info_gain_type == "log_prob_diff":
                             # 使用 log 概率差
                             cur_value = mean_log_prob
@@ -568,6 +582,18 @@ class LLMGenerationManager:
                         
                         info_gain_rewards[i].append(info_gain)
                         gt_values[i] = cur_value
+                        
+                        # ========== 完整验证：记录 Info Gain 计算过程 ==========
+                        if _HAS_FULL_CHECK and is_full_check_enabled():
+                            checker = get_full_checker()
+                            turn_idx = len(info_gain_rewards[i]) - 1
+                            checker.record_info_gain_calculation(
+                                sample_idx=i,
+                                turn_idx=turn_idx,
+                                prev_value=prev_value,
+                                curr_value=cur_value,
+                                info_gain=info_gain,
+                            )
                         
                         gt_log_probs_per_turn[i].append(log_probs.tolist())
                         gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())       

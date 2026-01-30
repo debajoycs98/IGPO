@@ -31,6 +31,12 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, kl_penalty
 from verl.utils.debug import GPUMemoryLogger
+# IGPO 完整验证
+try:
+    from verl.utils.debug import is_full_check_enabled, get_full_checker
+    _HAS_FULL_CHECK = True
+except ImportError:
+    _HAS_FULL_CHECK = False
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import logprobs_from_logits
@@ -360,6 +366,11 @@ class DataParallelPPOActor(BasePPOActor):
                     append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
+                
+                # ========== 完整验证：记录梯度 ==========
+                if _HAS_FULL_CHECK and is_full_check_enabled():
+                    checker = get_full_checker()
+                    checker.record_gradients(grad_norm=grad_norm.detach().item())
                 data = {"actor/grad_norm": grad_norm.detach().item()}
             append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()

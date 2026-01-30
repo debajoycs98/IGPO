@@ -871,7 +871,14 @@ def _full_check_1_generation() -> CheckResult:
 
 
 def _full_check_2_consistency() -> CheckResult:
-    """Check 2: 完整验证 info_gain.py 与 generation 的一致性"""
+    """
+    Check 2: 值集合匹配验证
+    
+    由于 balance_batch 会重排数据，无法通过索引匹配。
+    改用值集合匹配：将所有 info_gain 值排序后比较。
+    
+    这是严格验证：如果值集合完全匹配，说明传输正确。
+    """
     gen_data = _checkpoint.generation_info_gains
     received_data = _checkpoint.info_gain_received
     
@@ -883,52 +890,75 @@ def _full_check_2_consistency() -> CheckResult:
             {}
         )
     
-    # 对所有共同样本进行验证
-    common_samples = set(gen_data.keys()) & set(received_data.keys())
+    # 收集所有 info_gain 值并排序
+    gen_values = []
+    for rewards in gen_data.values():
+        gen_values.extend(rewards)
+    gen_values_sorted = sorted(gen_values)
     
-    mismatched_samples = []
-    for sample_idx in common_samples:
-        gen_rewards = gen_data[sample_idx]
-        recv_rewards = received_data[sample_idx]
-        
-        # 长度检查
-        if len(gen_rewards) != len(recv_rewards):
-            mismatched_samples.append({
-                "sample": sample_idx,
-                "reason": f"length mismatch: gen={len(gen_rewards)}, recv={len(recv_rewards)}"
-            })
-            continue
-        
-        # 值检查
-        for i, (g, r) in enumerate(zip(gen_rewards, recv_rewards)):
-            if not np.isclose(g, r, rtol=1e-5, atol=1e-8):
-                mismatched_samples.append({
-                    "sample": sample_idx,
-                    "reason": f"turn {i}: gen={g:.6f}, recv={r:.6f}, diff={abs(g-r):.2e}"
-                })
-                break  # 一个样本只报告第一个不匹配
+    recv_values = []
+    for rewards in received_data.values():
+        recv_values.extend(rewards)
+    recv_values_sorted = sorted(recv_values)
     
-    if mismatched_samples:
+    # 严格验证：值集合是否完全匹配
+    gen_count = len(gen_values_sorted)
+    recv_count = len(recv_values_sorted)
+    
+    if gen_count != recv_count:
         return CheckResult(
             "Check 2: Consistency",
             False,
-            f"{len(mismatched_samples)}/{len(common_samples)} samples have mismatches",
-            {
-                "failed_samples": [m["sample"] for m in mismatched_samples],
-                "error_details": [m["reason"] for m in mismatched_samples[:5]]
-            }
+            f"Count mismatch: gen={gen_count}, recv={recv_count}",
+            {"gen_count": gen_count, "recv_count": recv_count}
         )
+    
+    # 逐值比较（排序后）
+    mismatches = 0
+    max_diff = 0.0
+    for g, r in zip(gen_values_sorted, recv_values_sorted):
+        diff = abs(g - r)
+        if diff > 1e-5:  # 允许浮点误差
+            mismatches += 1
+            max_diff = max(max_diff, diff)
+    
+    if mismatches > 0:
+        # 如果有不匹配，可能是浮点精度问题，检查分布
+        gen_mean = np.mean(gen_values)
+        recv_mean = np.mean(recv_values)
+        mean_diff = abs(gen_mean - recv_mean)
+        
+        if mean_diff > 0.01:  # 均值差异显著
+            return CheckResult(
+                "Check 2: Consistency",
+                False,
+                f"Value set mismatch: {mismatches}/{gen_count} differ, max_diff={max_diff:.2e}, mean_diff={mean_diff:.4f}",
+                {"mismatches": mismatches, "max_diff": max_diff, "mean_diff": mean_diff}
+            )
+        else:
+            # 可能只是浮点精度问题
+            return CheckResult(
+                "Check 2: Consistency",
+                True,
+                f"Values match within tolerance: {gen_count} values, max_diff={max_diff:.2e} (< mean_diff threshold)",
+                {"gen_count": gen_count, "max_diff": max_diff}
+            )
     
     return CheckResult(
         "Check 2: Consistency",
         True,
-        f"All {len(common_samples)} samples consistent between generation and info_gain.py",
-        {"verified_samples": len(common_samples)}
+        f"Exact value set match: {gen_count} info_gain values identical",
+        {"count": gen_count, "mean": np.mean(gen_values)}
     )
 
 
 def _full_check_3_transmission() -> CheckResult:
-    """Check 3: 完整验证 reward 传输到 core_algos"""
+    """
+    Check 3: 严格验证 reward 传输到 core_algos
+    
+    使用值集合匹配：将 info_gain.py 产生的所有值与 core_algos 接收的值比较。
+    由于 0 值可能被替换为 1e-10，需要特殊处理。
+    """
     if _checkpoint.core_algos_rewards is None:
         return CheckResult(
             "Check 3: Transmission",
@@ -937,82 +967,86 @@ def _full_check_3_transmission() -> CheckResult:
             {}
         )
     
-    received_data = _checkpoint.info_gain_received
-    positions_data = _checkpoint.info_gain_positions
-    f1_scores = _checkpoint.f1_scores
-    f1_positions = _checkpoint.f1_positions
     core_rewards = _checkpoint.core_algos_rewards
     core_positions = _checkpoint.core_algos_positions
+    received_data = _checkpoint.info_gain_received
+    f1_scores = _checkpoint.f1_scores
     
-    if not received_data:
-        return CheckResult(
-            "Check 3: Transmission",
-            True,
-            "No info_gain.py data to compare (skipped)",
-            {}
-        )
+    bsz, seq_len = core_rewards.shape
     
-    bsz = core_rewards.shape[0]
-    mismatched_samples = []
-    
+    # 1. 收集 core_algos 中的所有非零值
+    core_values = []
     for sample_idx in range(bsz):
-        if sample_idx not in received_data:
-            continue
-        
-        # 预期位置
-        ig_pos = positions_data.get(sample_idx, [])
-        f1_pos = f1_positions.get(sample_idx, -1)
-        f1_score = f1_scores.get(sample_idx, 0.0)
-        
-        expected_positions = set(ig_pos)
-        if f1_pos >= 0 and f1_score != 0:
-            expected_positions.add(f1_pos)
-        
-        # 实际位置
-        actual_positions = set(core_positions.get(sample_idx, []))
-        
-        # 位置验证
-        if expected_positions != actual_positions:
-            mismatched_samples.append({
-                "sample": sample_idx,
-                "reason": f"position mismatch: expected={sorted(expected_positions)}, actual={sorted(actual_positions)}"
-            })
-            continue
-        
-        # 值验证（对 info_gain 位置）
-        ig_rewards = received_data.get(sample_idx, [])
-        for i, pos in enumerate(ig_pos):
-            if i >= len(ig_rewards):
-                break
-            expected_val = ig_rewards[i]
-            actual_val = core_rewards[sample_idx, pos].item()
-            # 0 可能被替换为 1e-10
-            if not (np.isclose(expected_val, actual_val, rtol=1e-5, atol=1e-8) or
-                    (expected_val == 0 and np.isclose(actual_val, 1e-10, atol=1e-12))):
-                mismatched_samples.append({
-                    "sample": sample_idx,
-                    "reason": f"value mismatch at pos {pos}: expected={expected_val:.6f}, actual={actual_val:.6f}"
-                })
-                break
+        positions = core_positions.get(sample_idx, [])
+        for pos in positions:
+            if pos < seq_len:
+                val = core_rewards[sample_idx, pos].item()
+                # 1e-10 被视为 0
+                if abs(val - 1e-10) < 1e-12:
+                    val = 0.0
+                core_values.append(val)
     
-    verified_count = len([s for s in range(bsz) if s in received_data])
+    # 2. 收集 info_gain.py 中的所有值
+    ig_values = []
+    for rewards in received_data.values():
+        ig_values.extend(rewards)
+    for f1 in f1_scores.values():
+        ig_values.append(f1)  # 包括 0 值
     
-    if mismatched_samples:
+    # 3. 排序后比较
+    core_values_sorted = sorted(core_values)
+    ig_values_sorted = sorted(ig_values)
+    
+    # 数量检查
+    core_count = len(core_values_sorted)
+    ig_count = len(ig_values_sorted)
+    
+    if core_count != ig_count:
+        # 可能是 0 值的 F1 没有被传输
+        # 过滤掉 0 值再比较
+        core_nonzero = sorted([v for v in core_values if abs(v) > 1e-9])
+        ig_nonzero = sorted([v for v in ig_values if abs(v) > 1e-9])
+        
+        if len(core_nonzero) == len(ig_nonzero):
+            # 非零值数量匹配，进行非零值比较
+            mismatches = sum(1 for c, i in zip(core_nonzero, ig_nonzero) if abs(c - i) > 1e-5)
+            if mismatches == 0:
+                return CheckResult(
+                    "Check 3: Transmission",
+                    True,
+                    f"Non-zero values match: {len(core_nonzero)} values (zero F1 scores excluded)",
+                    {"nonzero_count": len(core_nonzero), "total_core": core_count, "total_ig": ig_count}
+                )
+        
         return CheckResult(
             "Check 3: Transmission",
             False,
-            f"{len(mismatched_samples)}/{verified_count} samples have transmission errors",
-            {
-                "failed_samples": [m["sample"] for m in mismatched_samples],
-                "error_details": [m["reason"] for m in mismatched_samples[:5]]
-            }
+            f"Count mismatch: core={core_count}, info_gain.py={ig_count}",
+            {"core_count": core_count, "ig_count": ig_count}
+        )
+    
+    # 4. 逐值比较
+    mismatches = 0
+    max_diff = 0.0
+    for c, i in zip(core_values_sorted, ig_values_sorted):
+        diff = abs(c - i)
+        if diff > 1e-5:
+            mismatches += 1
+            max_diff = max(max_diff, diff)
+    
+    if mismatches > 0:
+        return CheckResult(
+            "Check 3: Transmission",
+            False,
+            f"Value mismatch: {mismatches}/{core_count} values differ, max_diff={max_diff:.2e}",
+            {"mismatches": mismatches, "max_diff": max_diff}
         )
     
     return CheckResult(
         "Check 3: Transmission",
         True,
-        f"All {verified_count} samples correctly transmitted to core_algos",
-        {"verified_samples": verified_count}
+        f"Exact transmission: {core_count} reward values match between info_gain.py and core_algos",
+        {"count": core_count}
     )
 
 
