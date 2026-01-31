@@ -13,12 +13,12 @@
 </div>
 
 ## 📣 Latest News
-- **[Feb 01, 2026]**: 🔄 We have updated the codebase with more comprehensive features and functionality. [See details](resources/CHANGELOG_20260201.md)
+- **[Feb 01, 2026]**: 🔄 Codebase updated with new features. [See details](resources/CHANGELOG_20260201.md)
 - **[Jan 26, 2026]**: 🎉 Our **[IGPO](https://arxiv.org/abs/2510.14967)** paper has been accepted at ICLR 2026!
 - **[Oct 17, 2025]**: 📄 Our IGPO paper is now available on **[arXiv](https://arxiv.org/abs/2510.14967)** and **[Hugging Face](https://huggingface.co/papers/2510.14967)** daily paper.
 
 ## 💡 Method Overview
-We introduce IGPO, an RL algorithm for fine-grained credit assignment in search agent training. By modeling agentic search turns as an incremental information acquisition process, IGPO defines rewards as the marginal gain in the policy's probability of generating the correct answer. 
+We introduce IGPO, a RL algorithm for fine-grained credit assignment in search agent training. By modeling agentic search turns as an incremental information acquisition process, IGPO defines rewards as the marginal gain in the policy's probability of generating the correct answer. 
 
 <p align="center">
     <img src="./images/Framework.png" width="100%">
