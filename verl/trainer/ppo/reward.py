@@ -14,6 +14,7 @@
 
 import os
 
+import numpy as np
 import ray
 
 from verl import DataProto

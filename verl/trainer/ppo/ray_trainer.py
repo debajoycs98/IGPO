@@ -483,9 +483,9 @@ class RayPPOTrainer:
             # Dynamically load the custom dataset class specified in config
             try:
                 dataset_valid_cls = load_extern_type(self.config.data.custom_valid_cls.path, self.config.data.custom_valid_cls.name)
-                if not issubclass(custom_valid_cls, Dataset):
+                if not issubclass(dataset_valid_cls, Dataset):
                     raise TypeError(f"The custom dataset class '{self.config.data.custom_valid_cls.name}' from '{self.config.data.custom_valid_cls.path}' must inherit from torch.utils.data.Dataset")
-                print(f"Using custom valid dataset class: {custom_valid_cls.__name__}")
+                print(f"Using custom valid dataset class: {dataset_valid_cls.__name__}")
             except Exception as e:
                 print(f"Error loading custom valid dataset class: {e}")
                 raise e

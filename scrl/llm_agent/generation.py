@@ -837,10 +837,42 @@ class LLMGenerationManager:
             activate_list = activate_list_copy
            
         
-        # ========== Vectorized GT LogProb batch computation ==========
+        # ========== Vectorized GT LogProb batch computation (Prealigned Version) ==========
+        # This section uses the prealigned vectorization strategy for better mathematical rigor.
+        # It is completely independent and does not affect original mode computation.
         if use_vectorized_gt_logprob and vectorized_data_collector is not None:
             num_turns_collected = len(vectorized_data_collector['pseudo_outputs_per_turn'])
+            _USE_LEGACY_VECTORIZED = False  # Legacy implementation is disabled
             if num_turns_collected > 0:
+                # Use prealigned vectorized module (lazy import)
+                from scrl.llm_agent.prealigned_vectorized import compute_vectorized_gt_logprob
+                
+                info_gain_type = self.config.info_gain_type
+                gt_idx = vectorized_data_collector['gt_idx']
+                
+                # Call prealigned vectorized computation
+                vectorized_result = compute_vectorized_gt_logprob(
+                    pseudo_outputs_per_turn=vectorized_data_collector['pseudo_outputs_per_turn'],
+                    activate_lists_per_turn=vectorized_data_collector['activate_lists_per_turn'],
+                    gt_idx=gt_idx,
+                    actor_rollout_wg=self.actor_rollout_wg,
+                    tokenizer=self.tokenizer,
+                    info_gain_type=info_gain_type,
+                    enable_strict_validation=VERIFY_VECTORIZED,
+                )
+                
+                # Update results from vectorized computation
+                gt_values = vectorized_result['gt_values']
+                info_gain_rewards = vectorized_result['info_gain_rewards']
+                gt_log_probs_per_turn = vectorized_result['gt_log_probs_per_turn']
+                gt_entropys_per_turn = vectorized_result['gt_entropys_per_turn']
+                
+                # Store vectorized mean_log_probs for verification (if enabled)
+                if VERIFY_VECTORIZED:
+                    vectorized_mode_log_probs_per_turn = vectorized_result.get('vectorized_mean_log_probs', None)
+                
+            if num_turns_collected > 0 and _USE_LEGACY_VECTORIZED:
+                # ===== LEGACY: Left-padding implementation (disabled) =====
                 print(f"[IGPO] Vectorized GT LogProb: Processing {num_turns_collected} turns in batch...")
                 
                 # Batch compute GT log probs for all turns
