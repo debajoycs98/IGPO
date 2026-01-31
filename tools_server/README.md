@@ -1,45 +1,42 @@
-## 📝 介绍
+# IGPO Tool Server - Web Search
 
-DeepResearcher原版的API调用逻辑过于复杂，这里提供一个简易版本的实现。相比原版，我们
-- 通过文件系统而非网络实现API调用，支持在aistudio上进行模型训练，然后把server端代码放在物理机上；
-- 通过GRT提供的搜索引擎替代sersapi；
-- 去除了大量锁机制，提升效率；
-- 新增了一个test.ipynb的demo，可以不用拉起ray即可测试。DeepResearcher原版的API调用逻辑过于复杂；
-- 支持oss文件系统（直接在data_writing_file里面输入oss://***即可，使用oss需要配置osskey）
+Lightweight web search tool server for IGPO training.
 
-## 架构
-### 消费端：
-训练端（有gpu的AIstudio机器）启动train.sh/evaluate.sh，相应的配置实现在verl/trainer/config/ppo_trainer.yaml以及train.sh脚本里
+## Quick Start
 
-### 工作者端：
-在有网络的机器运行python tools_server/search_worker.py即可拉起搜索引擎+文字浏览器worker。
-相应的配置在tools_server/config.yaml 中。
+1. Get a Serper API key from https://serper.dev/ (2,500 free searches)
 
-### 注册中心：
-工具服务端（有网络的机器）启动tools_server/fs_server.py，该文件为注册中心，负责所有worker/consumer的维护，以及任务分发。每个task_path只能起一个。
-相应的配置在tools_server/config.yaml 中。
-注册中心会先维护所有有心跳的worker和consumer列表，然后当consumer有新的data.json后分发至不同的worker，等worker工作结束后将结果写回consumer路径。
+2. Edit `config.yaml`:
+```yaml
+serper_api_key: "your_api_key_here"
+```
 
+3. Run training - the tool server will be used automatically.
 
-### 工作路径文件结构
-task_path/                          # 根目录
-├── consumer_{UUID}/               # 任务提交节点
-│   ├── heartbeat                  # 心跳文件（时间戳）
-│   └── data.json                  # 待处理任务列表
-├── worker_{UUID}/                 # 任务处理节点
-│   ├── heartbeat                  # 心跳文件（时间戳）
-│   └── data.json                  # 待处理任务列表
+## Configuration
 
+```yaml
+# config.yaml
+search_engine: "google"     # or "bing"
+search_top_k: 10            # results per query
+serper_api_key: "xxx"       # Serper API key
+```
 
-TODO
-- 浏览器访问效率
-- 带图的浏览器
+## Supported Search Engines
 
-## 🚀 Get Started
+| Engine | Provider | Free Tier |
+|--------|----------|-----------|
+| Google | Serper API | 2,500 searches |
+| Bing | Azure | Pay as you go |
 
-1. 替换`tools_server/config.yaml` 中的 openai_api_key/oss key等。可以去阿里云领取免费的1M tokens.
-2. 运行 `python tools_server/fs_server.py`，启动tools_server。
-3. 运行 `python tools_server/search_worker.py`，注册tool服务。
-4. 通过test.ipynb 启动agent单次运行demo测试
-5. 如果需要运行train.sh/evaluate.sh，还需要在训练端verl/trainer/config/ppo_trainer.yaml 配置osskey
+## Files
 
+```
+tools_server/
+├── config.yaml      # Configuration
+├── handler.py       # Web search handler
+├── tools.py         # Tool definition
+├── util.py          # MessageClient
+└── search/
+    └── search_api.py  # Search implementations
+```
