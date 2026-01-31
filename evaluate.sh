@@ -31,7 +31,7 @@ N_GPUS=${N_GPUS:-8}
 
 # Tool server communication path (required for online_search mode)
 # Can be OSS path (oss://bucket/path/) or local path (/tmp/igpo_eval/)
-DATA_WRITING_PATH=${DATA_WRITING_PATH:-"oss://your-bucket/igpo_eval/"}
+DATA_WRITING_PATH=${DATA_WRITING_PATH:-"./cache/task_queue/"}
 
 # ============================================
 # Create output directories
