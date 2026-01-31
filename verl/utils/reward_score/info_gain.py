@@ -280,10 +280,13 @@ def compute_score(solution_str, ground_truth, data_source, val_type='f1', info_g
         
         # Assign reward
         if i < chats_size - 1:
-            ig_value = info_gain_reward[i]
-            if ig_value == 0.0:
-                ig_value = 1e-10  # Avoid being skipped by !=0 check
-            scores[last_token_idx] = ig_value
+            # Additional boundary check to prevent IndexError
+            if i < len(info_gain_reward):
+                ig_value = info_gain_reward[i]
+                if ig_value == 0.0:
+                    ig_value = 1e-10  # Avoid being skipped by !=0 check
+                scores[last_token_idx] = ig_value
+            # else: skip this turn's info_gain (defensive, should not happen)
         else:
             scores[last_token_idx] = alpha * f1_score
     
