@@ -4,7 +4,7 @@ search_top_k: 10
 search_region: "us"
 search_lang: "en"
 page_view_port_size: 1024*40
-serper_api_key: "a7e168763cb37401651e2abcf9bcb6ea3d49758a3035141c9ef8a5de67c9901d"
+serper_api_key: ""
 
 reading_agent_model: "qwen-max-2025-01-25"
 

@@ -1,20 +1,3 @@
-#!/bin/bash
-# =============================================================================
-# IGPO Training Script - Lightweight Version (Open Source)
-# =============================================================================
-# This script uses the lightweight tool_server (web search only).
-# For enterprise version with OSS support, see train_ant.sh
-# =============================================================================
-#
-# Debug Options:
-# --------------
-# To enable vectorized GT LogProb verification mode (compares vectorized vs original):
-#   export IGPO_VERIFY_VECTORIZED=true
-#
-# To use vectorized GT LogProb computation (more efficient for multi-turn):
-#   +algorithm.use_vectorized_gt_logprob=true
-#
-# =============================================================================
 
 # Environment setup
 export VLLM_ATTENTION_BACKEND=XFORMERS
@@ -27,7 +10,7 @@ export project_name="project_name"
 export experiment_name="experiment_name"
 
 # Model path (modify this to your model location)
-export MODEL_PATH="/path/to/your/Qwen2.5-7B-Instruct"
+export MODEL_PATH="Qwen/Qwen2.5-7B-Instruct"
 
 # Output directories
 export OUTPUT="./outputs/${project_name}/${experiment_name}"
@@ -41,11 +24,11 @@ mkdir -p ./logs
 # =============================================================================
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     data.train_files=./data/train.parquet \
-    data.val_files=./data/test.parquet \
+    data.val_files=./data/dev.parquet \
     data.train_batch_size=32 \
-    data.max_prompt_length=90301 \
-    data.max_response_length=4000 \
-    +data.max_model_len=94302 \
+    data.max_prompt_length=30767 \
+    data.max_response_length=2000 \
+    +data.max_model_len=32768 \
     +data.data_writing_path=./cache/task_queue/ \
     actor_rollout_ref.model.path=${MODEL_PATH} \
     actor_rollout_ref.model.use_remove_padding=true \
@@ -55,8 +38,8 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.65 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=94302 \
-    actor_rollout_ref.rollout.max_model_len=94302 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
+    actor_rollout_ref.rollout.max_model_len=32768 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.use_kl_loss=true \
     actor_rollout_ref.actor.use_dynamic_bsz=true \
@@ -86,8 +69,8 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     trainer.default_hdfs_dir=null \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
-    trainer.save_freq=50 \
-    trainer.test_freq=5 \
+    trainer.save_freq=1 \
+    trainer.test_freq=1 \
     trainer.validation_data_dir=${EVAL_LOG_PATH} \
     trainer.default_local_dir=${OUTPUT} \
     agent_grpo.n=16 \

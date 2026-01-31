@@ -17,9 +17,9 @@ data:
   image_key: images
   video_key: videos
   n_gpus_per_node: 8
-  oss_access_key_id: "YOUR_OSS_ACCESS_KEY_ID"
-  oss_access_key_secret: "YOUR_OSS_ACCESS_KEY_SECRET"
-  oss_endpoint: "oss-cn-hangzhou-zmf.aliyuncs.com" 
+  oss_access_key_id: ""  # Set via environment variable OSS_ACCESS_KEY_ID
+  oss_access_key_secret: ""  # Set via environment variable OSS_ACCESS_KEY_SECRET
+  oss_endpoint: "" 
   custom_train_cls:
       path: null
       name: null
@@ -230,7 +230,7 @@ trainer:
   critic_warmup: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: False
-  default_local_dir: /root/${trainer.project_name}/${trainer.experiment_name}
+  default_local_dir: ./outputs/${trainer.project_name}/${trainer.experiment_name}
   max_actor_ckpt_to_keep: null
   max_critic_ckpt_to_keep: null
   # The timeout for ray worker group to wait for the register center to be ready

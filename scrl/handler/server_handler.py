@@ -21,8 +21,8 @@ handler_config = SimpleNamespace(
     QUERY_SIGNAL=1,
 )
 client = OpenAI(
-    api_key="sk-9b7fbda4dd9b4442a0e473dc5a039aa7",  # How to get API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
-    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    api_key="",  # How to get API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
+    base_url="",
 )
 query_save_path_dir = os.path.dirname(config["query_save_path"])
 if not os.path.exists(query_save_path_dir):

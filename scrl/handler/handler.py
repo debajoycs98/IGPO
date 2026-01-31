@@ -372,8 +372,8 @@ if __name__ == "__main__":
         QUERY_SIGNAL=1,
     )
     client = OpenAI(
-        api_key="sk-9b7fbda4dd9b4442a0e473dc5a039aa7",  # How to get API Key: https://help.aliyun.com/zh/model-studio/developer-reference/get-api-key
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key="",  
+        base_url="",
     )
     handler = Handler(agent_config=config, client=client, handler_config=handler_config)
     handler.foward_to_server()

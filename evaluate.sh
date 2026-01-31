@@ -1,10 +1,3 @@
-#!/bin/bash
-# ============================================
-# IGPO Evaluation Script
-# 
-# This script runs evaluation only by reusing the training pipeline
-# with val_only=true mode. No training is performed.
-# ============================================
 
 set -e
 
@@ -19,18 +12,16 @@ export PET_NODE_RANK=0
 # ============================================
 # User Configuration (modify these)
 # ============================================
-export project_name=${project_name:-"igpo_eval"}
-export experiment_name=${experiment_name:-"evaluation"}
-MODEL_PATH=${MODEL_PATH:-"/root/Qwen2.5-7B-Instruct"}
-VAL_FILES=${VAL_FILES:-"./data/test.parquet"}
+export project_name=${project_name:-"project_name"}
+export experiment_name=${experiment_name:-"experiment_name"}
+MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-7B-Instruct"}
+TEST_FILES=${TEST_FILES:-"./data/test.parquet"}
 OUTPUT_DIR=${OUTPUT_DIR:-"./eval_results"}
 EVAL_LOG_PATH=${EVAL_LOG_PATH:-"./eval_log"}
 MAX_TURNS=${MAX_TURNS:-10}
-SEARCH_ENGINE=${SEARCH_ENGINE:-"online_search"}  # "online_search" or "rag"
+SEARCH_ENGINE=${SEARCH_ENGINE:-"online_search"}  
 N_GPUS=${N_GPUS:-8}
 
-# Tool server communication path (required for online_search mode)
-# Can be OSS path (oss://bucket/path/) or local path (/tmp/igpo_eval/)
 DATA_WRITING_PATH=${DATA_WRITING_PATH:-"./cache/task_queue/"}
 
 # ============================================
@@ -43,7 +34,7 @@ echo "============================================"
 echo "IGPO Evaluation (val_only mode)"
 echo "============================================"
 echo "Model: ${MODEL_PATH}"
-echo "Validation data: ${VAL_FILES}"
+echo "Test data: ${TEST_FILES}"
 echo "Output dir: ${OUTPUT_DIR}"
 echo "Max turns: ${MAX_TURNS}"
 echo "Search engine: ${SEARCH_ENGINE}"
@@ -55,8 +46,8 @@ echo "============================================"
 # Run Evaluation using main_ppo with val_only=true
 # ============================================
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
-    data.train_files=${VAL_FILES} \
-    data.val_files=${VAL_FILES} \
+    data.train_files=${TEST_FILES} \
+    data.val_files=${TEST_FILES} \
     data.train_batch_size=32 \
     data.max_prompt_length=30767 \
     data.max_response_length=2000 \
@@ -85,8 +76,8 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     critic.model.path=${MODEL_PATH} \
     critic.ppo_micro_batch_size_per_gpu=2 \
     algorithm.gamma=1.0 \
-    +algorithm.info_gain_type=prob_diff \
-    +algorithm.info_gain_norm_mode=joint \
+    +algorithm.info_gain_type=log_prob_diff \
+    +algorithm.info_gain_norm_mode=separate \
     +algorithm.use_vectorized_gt_logprob=false \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.logger=['console'] \

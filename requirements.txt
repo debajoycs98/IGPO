@@ -1,61 +1,86 @@
-# requirements.txt records the full set of dependencies for development
+
+# Core ML Framework
+torch>=2.4.0
+transformers
 accelerate
-codetiming
+peft
 datasets
-dill
-hydra-core
-liger-kernel
+safetensors
+einops
+
+# Ray distributed computing
+ray[default]>=2.10
+
+# vLLM inference
+vllm
+triton>=3.1.0
+
+# Data processing
 numpy
 pandas
-peft
 pyarrow>=15.0.0
-pybind11
-pylatexenc
-ray[data,train,tune,serve]
-tensordict<0.6
 torchdata
+tensordict>=0.6.0
+
+# Configuration & logging
+hydra-core
+omegaconf
 wandb
-pathvalidate
-smolagents
-mammoth
-pdfminer
-python-pptx
-puremagic
-pydub
-SpeechRecognition
-PyPDF2
-youtube_transcript_api
-serpapi
-tqdm
-pubchempy
-Bio
-scikit-learn
-google_search_results
-markdownify
-numexpr
-openai
-openpyxl
-python-dotenv
-chess
-sympy
-xlrd
+codetiming
+PyYAML
+pydantic
+
+# Hugging Face & Model hubs
 huggingface_hub
-Requests
-beautifulsoup4
-Pillow
 modelscope
-html2text
-pathvalidate
-smolagents
-pdfminer
-mammoth
-pdfminer.six
-python-pptx
-pydub
-puremagic
-SpeechRecognition
-youtube_transcript_api
-html2text
+
+# Web & API
 flask
+fastapi
+uvicorn
+starlette
+requests
+aiohttp
+openai
+
+# Web scraping & text processing
+beautifulsoup4
+html2text
+markdownify
+Pillow
+pdfminer.six
+mammoth
+python-pptx
+
+# Utilities
+tqdm
+dill
+filelock
+cloudpickle
+cachetools
 psutil
-pymongo
+packaging
+pathvalidate
+puremagic
+setuptools
+tomli
+Jinja2
+
+# Scientific computing
+sympy
+pylatexenc
+
+# Optional: GPU acceleration (install separately)
+# liger-kernel
+# flash-attn
+
+# Optional: Media processing
+pydub
+youtube_transcript_api
+
+# Optional: Search APIs
+serpapi
+smolagents
+
+# Optional: Testing
+# pytest

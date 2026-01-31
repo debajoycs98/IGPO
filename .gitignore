@@ -50,10 +50,19 @@ logs/
 .env.local
 
 # Signal directory (runtime generated)
-signal/*.json
+signal/
+
+# Enterprise tools server (contains sensitive configs)
+tools_server_ant/
 
 # Handler cache
-scrl/handler/cache/*.json
+scrl/handler/cache/
+
+# Project cache directories
+cache/
+
+# Compiled Python files (additional patterns)
+*/__pycache__/
 
 # Debug files
 debug.json
