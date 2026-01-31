@@ -14,16 +14,11 @@ import os
 import json
 from typing import List, Dict, Tuple, Optional
 
-# Debug flag for shape printing (set IGPO_DEBUG_SHAPES=true to enable)
-DEBUG_SHAPES = os.environ.get('IGPO_DEBUG_SHAPES', '').lower() in ('true', '1', 'yes')
-if DEBUG_SHAPES:
-    print("[IGPO] Debug mode enabled: tensor shape printing is ON (IGPO_DEBUG_SHAPES=true)")
-
-# Verification flag: when enabled, compute both vectorized and original mode, then compare
-# Set IGPO_VERIFY_VECTORIZED=true to enable
+# Verification flag for vectorized GT LogProb computation
+# Set IGPO_VERIFY_VECTORIZED=true to enable comparison between vectorized and original mode
 VERIFY_VECTORIZED = os.environ.get('IGPO_VERIFY_VECTORIZED', '').lower() in ('true', '1', 'yes')
 if VERIFY_VECTORIZED:
-    print("[IGPO] Verification mode enabled: will compare vectorized vs original results (IGPO_VERIFY_VECTORIZED=true)")
+    print("[IGPO] Verification mode enabled: will compare vectorized vs original results")
 
 # Import vectorized GT logprob module
 from scrl.llm_agent.vectorized_gt_logprob import (
@@ -299,23 +294,8 @@ class LLMGenerationManager:
 
 
         node_rank = int(os.environ["PET_NODE_RANK"])
-        # Debug: print global_steps to identify if this is initial validation (step=0) or training
-        is_validation = global_steps <= 0
-        print(f"[DEBUG] run_llm_loop: global_steps={global_steps}, is_validation={is_validation}")
-        print(f"node {node_rank} gains {len(gen_batch.batch['input_ids'])} * {self.config.n} datas!",flush=True)
+        print(f"node {node_rank} gains {len(gen_batch.batch['input_ids'])} * {self.config.n} datas!", flush=True)
         query_contents = self.parse_question(gen_batch.batch['input_ids'])
-        
-        # ===== CRITICAL LENGTH CHECK =====
-        print(f"[DEBUG] ===== LENGTH CHECK =====")
-        print(f"[DEBUG] gen_batch['input_ids'] shape: {gen_batch.batch['input_ids'].shape}")
-        print(f"[DEBUG] ground_truths length: {len(ground_truths)}")
-        print(f"[DEBUG] query_contents length: {len(query_contents)}")
-        print(f"[DEBUG] self.config.n: {self.config.n}")
-        print(f"[DEBUG] Expected messages_list length: {len(query_contents) * self.config.n}")
-        print(f"[DEBUG] Expected ground_truths_rolling length: {len(ground_truths) * self.config.n}")
-        if len(ground_truths) != len(query_contents):
-            print(f"[DEBUG] ⚠️ WARNING: ground_truths length ({len(ground_truths)}) != query_contents length ({len(query_contents)})!")
-        print(f"[DEBUG] ===========================")
         
         messages_list = []
         agent_grpo_idx = []
@@ -449,7 +429,6 @@ class LLMGenerationManager:
                 rollings_active = self.tokenizer.apply_chat_template(activate_messages_list, add_generation_prompt=True, tokenize=False)
             except Exception as e:
                 print(f"Error in tokenizer.apply_chat_template: {e}")
-                json.dump(activate_messages_list, open('./debug.json', 'w'))
                 # Fallback strategy: process each message individually
                 rollings_active = []
                 for msg in activate_messages_list:
@@ -458,7 +437,6 @@ class LLMGenerationManager:
                         rollings_active.extend(result)
                     except Exception as inner_e:
                         print(f"Failed to process message: {inner_e}")
-                        print(f"Message content: {msg}")
                         raise  # Cannot recover, raise exception
     
             think = True
@@ -520,45 +498,7 @@ class LLMGenerationManager:
                         info_gain_rollings_active.batch['attention_mask'][activate_list[i], :len(rollings_active.batch['attention_mask'][i])] = rollings_active.batch['attention_mask'][i]
                         info_gain_rollings_active.batch['position_ids'][activate_list[i], :len(rollings_active.batch['position_ids'][i])] = rollings_active.batch['position_ids'][i]    
             
-            # Debug: critical shape check before pseudo_generate_sequences
-            if step == 0:
-                print(f"[DEBUG step=0] ===== BEFORE pseudo_generate_sequences =====")
-                print(f"[DEBUG step=0] info_gain_rollings_active input_ids shape: {info_gain_rollings_active.batch['input_ids'].shape}")
-                print(f"[DEBUG step=0] pseudo_resps_with_gt length: {len(pseudo_resps_with_gt)}")
-                print(f"[DEBUG step=0] activate_list length: {len(activate_list)}")
-                if len(pseudo_resps_with_gt) != info_gain_rollings_active.batch['input_ids'].shape[0]:
-                    print(f"[DEBUG step=0] ⚠️ MISMATCH: pseudo_resps_with_gt ({len(pseudo_resps_with_gt)}) != batch_size ({info_gain_rollings_active.batch['input_ids'].shape[0]})")
-                print(f"[DEBUG step=0] ================================================")
-            
-            # DEBUG: Track specific samples before pseudo_generate_sequences
-            DEBUG_SAMPLES = [243, 251]
-            for debug_idx in DEBUG_SAMPLES:
-                if debug_idx in activate_list:
-                    pos_ids = info_gain_rollings_active.batch['position_ids'][debug_idx]
-                    input_ids = info_gain_rollings_active.batch['input_ids'][debug_idx]
-                    attn_mask = info_gain_rollings_active.batch['attention_mask'][debug_idx]
-                    valid_len = attn_mask.sum().item()
-                    print(f"[DEBUG INFO_GAIN_ACTIVE] step={step}, sample={debug_idx}, "
-                          f"input_ids.shape={input_ids.shape}, valid_len={valid_len}, "
-                          f"pos_ids[-10:]={pos_ids[-10:].tolist()}, "
-                          f"pos_ids[valid_len-5:valid_len]={pos_ids[max(0,int(valid_len)-5):int(valid_len)].tolist()}")
-            
             pseudo_gen_output = self.pseudo_generate_sequences(info_gain_rollings_active, pseudo_resps_with_gt)
-
-            # Debug shape printing (enable with IGPO_DEBUG_SHAPES=true)
-            if DEBUG_SHAPES:
-                print("rollings_active input_ids shape:", rollings_active.batch['input_ids'].shape)
-                print("rollings_active attention_mask shape:", rollings_active.batch['attention_mask'].shape)
-                print("rollings_active position_ids shape:", rollings_active.batch['position_ids'].shape)
-                print("pseudo_gen_output prompts shape:", pseudo_gen_output.batch['prompts'].shape)
-                print("info_gain_rollings_active input_ids shape:", info_gain_rollings_active.batch['input_ids'].shape)
-                print("info_gain_rollings_active attention_mask shape:", info_gain_rollings_active.batch['attention_mask'].shape)
-                print("info_gain_rollings_active position_ids shape:", info_gain_rollings_active.batch['position_ids'].shape)
-                print("pseudo_gen_output prompts shape:", pseudo_gen_output.batch['prompts'].shape)
-                print("pseudo_gen_output attention_mask shape:", pseudo_gen_output.batch['attention_mask'].shape)
-                print("pseudo_gen_output position_ids shape:", pseudo_gen_output.batch['position_ids'].shape)
-                print("pseudo_gen_output responses shape:", pseudo_gen_output.batch['responses'].shape)
-                print("pseudo_gen_output input_ids shape:", pseudo_gen_output.batch['input_ids'].shape)
             
             # ========== GT LogProb computation (vectorized or immediate) ==========
             if use_vectorized_gt_logprob and vectorized_data_collector is not None:
@@ -579,33 +519,6 @@ class LLMGenerationManager:
                     # Compute log_probs using original mode (immediate computation)
                     verify_log_probs = self.actor_rollout_wg.compute_log_prob(pseudo_gen_output)
                     info_gain_type = self.config.info_gain_type
-                    
-                    # DEBUG: Track specific samples that have mismatches (243, 251)
-                    DEBUG_SAMPLES = [243, 251]
-                    for debug_idx in DEBUG_SAMPLES:
-                        if debug_idx in activate_list:
-                            gt_range = gt_idx[debug_idx]
-                            if gt_range[0] < gt_range[1]:
-                                debug_log_probs = verify_log_probs.batch['old_log_probs'][debug_idx, gt_range[0]:gt_range[1]]
-                                debug_mean = debug_log_probs.mean().item()
-                                print(f"[DEBUG ORIG] step={step}, sample={debug_idx}, in_activate_list=True, "
-                                      f"gt_range={gt_range}, log_probs.mean={debug_mean:.6f}")
-                                # Print position_ids and input_ids info for this sample
-                                pos_ids = pseudo_gen_output.batch['position_ids'][debug_idx]
-                                input_ids = pseudo_gen_output.batch['input_ids'][debug_idx]
-                                print(f"[DEBUG ORIG] step={step}, sample={debug_idx}, "
-                                      f"input_ids.shape={input_ids.shape}, pos_ids[-10:]={pos_ids[-10:].tolist()}")
-                        else:
-                            print(f"[DEBUG ORIG] step={step}, sample={debug_idx}, in_activate_list=False")
-                    
-                    # DEBUG: Print original mode info for first turn
-                    if step < 2 and len(activate_list) > 0:
-                        print(f"[DEBUG ORIG step={step}] verify_log_probs.shape = {verify_log_probs.batch['old_log_probs'].shape}")
-                        first_idx = activate_list[0]
-                        first_gt_range = gt_idx[first_idx]
-                        if first_gt_range[0] < first_gt_range[1]:
-                            first_log_probs = verify_log_probs.batch['old_log_probs'][first_idx, first_gt_range[0]:first_gt_range[1]]
-                            print(f"[DEBUG ORIG step={step}] sample={first_idx}, gt_range={first_gt_range}, log_probs.mean={first_log_probs.mean().item():.6f}")
                     
                     if step == 0:
                         for i in activate_list:
@@ -650,83 +563,24 @@ class LLMGenerationManager:
                 info_gain_type = self.config.info_gain_type  # "prob_diff" or "log_prob_diff"
                 
                 if step == 0:
-                    # Debug: print critical shape information at step 0
-                    old_log_probs_tensor = pseudo_gen_output_log_probs.batch['old_log_probs']
-                    old_log_probs_shape = old_log_probs_tensor.shape
-                    print(f"[DEBUG step=0] ===== CRITICAL SHAPE INFO =====")
-                    print(f"[DEBUG step=0] old_log_probs shape: {old_log_probs_shape}")
-                    print(f"[DEBUG step=0] old_log_probs dtype: {old_log_probs_tensor.dtype}")
-                    print(f"[DEBUG step=0] old_log_probs has_nan: {torch.isnan(old_log_probs_tensor).any().item()}")
-                    print(f"[DEBUG step=0] old_log_probs nan_count: {torch.isnan(old_log_probs_tensor).sum().item()} / {old_log_probs_tensor.numel()}")
-                    if not torch.isnan(old_log_probs_tensor).all():
-                        valid_mask = ~torch.isnan(old_log_probs_tensor)
-                        print(f"[DEBUG step=0] old_log_probs valid min: {old_log_probs_tensor[valid_mask].min().item():.4f}, max: {old_log_probs_tensor[valid_mask].max().item():.4f}")
-                    print(f"[DEBUG step=0] gt_idx length: {len(gt_idx)}")
-                    print(f"[DEBUG step=0] activate_list length: {len(activate_list)}")
-                    print(f"[DEBUG step=0] activate_list range: [{min(activate_list) if activate_list else 'N/A'}, {max(activate_list) if activate_list else 'N/A'}]")
-                    # Print first few gt_idx to check if they are valid
-                    print(f"[DEBUG step=0] First 5 gt_idx: {gt_idx[:5] if len(gt_idx) >= 5 else gt_idx}")
-                    print(f"[DEBUG step=0] pseudo_gen_output responses shape: {pseudo_gen_output.batch['responses'].shape}")
-                    print(f"[DEBUG step=0] ===============================")
-                    
-                    # Statistics counters for debug summary
-                    skip_gt_idx_oob = 0
-                    skip_logprobs_oob = 0
-                    skip_empty_range = 0
-                    skip_nan_inf = 0
-                    
                     for i in activate_list:
-                        # Check if index is out of bounds for gt_idx
-                        if i >= len(gt_idx):
-                            skip_gt_idx_oob += 1
-                            continue
-                        # Check if index is out of bounds for old_log_probs
-                        if i >= old_log_probs_shape[0]:
-                            skip_logprobs_oob += 1
-                            continue
                         # Check if gt_idx range is valid
-                        if gt_idx[i][0] >= gt_idx[i][1]:
-                            skip_empty_range += 1
+                        if i >= len(gt_idx) or gt_idx[i][0] >= gt_idx[i][1]:
                             continue
                         log_probs = pseudo_gen_output_log_probs.batch['old_log_probs'][i, gt_idx[i][0]:gt_idx[i][1]]
-                        
-                        # Debug: print first sample's log_probs details
-                        if i == activate_list[0]:
-                            print(f"[DEBUG step=0] Sample 0 log_probs shape: {log_probs.shape}, numel: {log_probs.numel()}")
-                            if log_probs.numel() > 0:
-                                print(f"[DEBUG step=0] Sample 0 log_probs min: {log_probs.min().item():.4f}, max: {log_probs.max().item():.4f}, has_nan: {torch.isnan(log_probs).any().item()}")
-                        
                         mean_log_prob = log_probs.mean().item()
                         
                         # Skip if mean_log_prob is nan or inf
                         if math.isnan(mean_log_prob) or math.isinf(mean_log_prob):
-                            skip_nan_inf += 1
                             continue
                         
                         if info_gain_type == "log_prob_diff":
-                            # Store mean of log probabilities
                             gt_values[i] = mean_log_prob
                         else:  # "prob_diff" (default)
-                            # Store geometric mean of probabilities (i.e., exp(mean(log P)))
                             gt_values[i] = torch.exp(torch.tensor(mean_log_prob)).item()
                         
                         gt_log_probs_per_turn[i].append(log_probs.tolist())
                         gt_entropys_per_turn[i].append(pseudo_gen_output_log_probs.batch['entropys'][i, gt_idx[i][0]:gt_idx[i][1]].tolist())
-                    
-                    # Print summary statistics instead of per-sample messages
-                    total_skipped = skip_gt_idx_oob + skip_logprobs_oob + skip_empty_range + skip_nan_inf
-                    if total_skipped > 0:
-                        print(f"[DEBUG step=0] ===== Skip Statistics =====")
-                        print(f"[DEBUG step=0] Total samples: {len(activate_list)}, Skipped: {total_skipped}, Processed: {len(activate_list) - total_skipped}")
-                        if skip_gt_idx_oob > 0:
-                            print(f"[DEBUG step=0]   - gt_idx out of bounds: {skip_gt_idx_oob}")
-                        if skip_logprobs_oob > 0:
-                            print(f"[DEBUG step=0]   - log_probs out of bounds: {skip_logprobs_oob}")
-                        if skip_empty_range > 0:
-                            print(f"[DEBUG step=0]   - empty gt_idx range: {skip_empty_range}")
-                        if skip_nan_inf > 0:
-                            print(f"[DEBUG step=0]   - nan/inf mean_log_prob: {skip_nan_inf}")
-                        print(f"[DEBUG step=0] ===========================")
                 else:
                     for i in activate_list:
                         # Check if gt_idx range is valid
@@ -975,8 +829,7 @@ class LLMGenerationManager:
                 })
                 
                 total_samples = merged_input_ids.shape[0]
-                print(f"[IGPO] Vectorized (LEFT PADDING): Merged {num_turns_collected} turns, batch={total_samples}, seq_len={max_seq_len}, resp_len={max_response_len}")
-                print(f"[IGPO] Turn response lengths: {turn_response_lengths}")
+                print(f"[IGPO] Vectorized: Merged {num_turns_collected} turns, batch={total_samples}, seq_len={max_seq_len}")
                 
                 # Call compute_log_prob ONCE for all turns
                 merged_log_probs = self.actor_rollout_wg.compute_log_prob(merged_batch)
@@ -991,52 +844,14 @@ class LLMGenerationManager:
                 for bs in turn_batch_sizes:
                     turn_boundaries.append(turn_boundaries[-1] + bs)
                 
-                # DEBUG: Track specific samples
-                DEBUG_SAMPLES = [243, 251]
-                debug_vec_log_probs = {s: {} for s in DEBUG_SAMPLES}  # {sample_idx: {turn_idx: mean_log_prob}}
-                
                 for turn_idx in range(num_turns_collected):
                     start_idx = turn_boundaries[turn_idx]
                     end_idx = turn_boundaries[turn_idx + 1]
                     activate_list_for_turn = vectorized_data_collector['activate_lists_per_turn'][turn_idx]
                     
                     # Extract current turn's log_probs from merged results
-                    # Note: merged_old_log_probs has shape [total_samples, max_response_len]
                     turn_old_log_probs = merged_old_log_probs[start_idx:end_idx]
                     turn_entropys = merged_entropys[start_idx:end_idx]
-                    
-                    # DEBUG: Track specific samples (243, 251)
-                    for debug_idx in DEBUG_SAMPLES:
-                        if debug_idx in activate_list_for_turn:
-                            gt_range = gt_idx[debug_idx]
-                            if gt_range[0] < gt_range[1]:
-                                debug_log_probs = turn_old_log_probs[debug_idx, gt_range[0]:gt_range[1]]
-                                debug_mean = debug_log_probs.mean().item()
-                                debug_vec_log_probs[debug_idx][turn_idx] = debug_mean
-                                print(f"[DEBUG VEC] turn_idx={turn_idx}, sample={debug_idx}, in_activate_list=True, "
-                                      f"gt_range={gt_range}, log_probs.mean={debug_mean:.6f}")
-                                # Print position_ids info from stored pseudo_output
-                                stored_output = vectorized_data_collector['pseudo_outputs_per_turn'][turn_idx]
-                                pos_ids = stored_output.batch['position_ids'][debug_idx]
-                                input_ids = stored_output.batch['input_ids'][debug_idx]
-                                print(f"[DEBUG VEC] turn_idx={turn_idx}, sample={debug_idx}, "
-                                      f"input_ids.shape={input_ids.shape}, pos_ids[-10:]={pos_ids[-10:].tolist()}")
-                        else:
-                            print(f"[DEBUG VEC] turn_idx={turn_idx}, sample={debug_idx}, in_activate_list=False")
-                    
-                    # DEBUG: Print turn info
-                    if turn_idx < 2:
-                        print(f"[DEBUG VEC] turn_idx={turn_idx}, start_idx={start_idx}, end_idx={end_idx}")
-                        print(f"[DEBUG VEC] turn_old_log_probs.shape={turn_old_log_probs.shape}")
-                        print(f"[DEBUG VEC] activate_list_for_turn length={len(activate_list_for_turn)}")
-                        if len(activate_list_for_turn) > 0:
-                            first_global_idx = activate_list_for_turn[0]
-                            first_gt_range = gt_idx[first_global_idx]
-                            print(f"[DEBUG VEC] first sample global_idx={first_global_idx}, gt_range={first_gt_range}")
-                            if first_gt_range[0] < first_gt_range[1]:
-                                # Use global_idx within the turn's slice (global_idx maps to position in the turn batch)
-                                first_log_probs = turn_old_log_probs[first_global_idx, first_gt_range[0]:first_gt_range[1]]
-                                print(f"[DEBUG VEC] first sample log_probs.shape={first_log_probs.shape}, mean={first_log_probs.mean().item():.6f}")
                     
                     if turn_idx == 0:
                         # First turn: initialize gt_values
