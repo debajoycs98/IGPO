@@ -5,6 +5,16 @@
 # This script uses the lightweight tool_server (web search only).
 # For enterprise version with OSS support, see train_ant.sh
 # =============================================================================
+#
+# Debug Options:
+# --------------
+# To enable vectorized GT LogProb verification mode (compares vectorized vs original):
+#   export IGPO_VERIFY_VECTORIZED=true
+#
+# To use vectorized GT LogProb computation (more efficient for multi-turn):
+#   +algorithm.use_vectorized_gt_logprob=true
+#
+# =============================================================================
 
 # Environment setup
 export VLLM_ATTENTION_BACKEND=XFORMERS

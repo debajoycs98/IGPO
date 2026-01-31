@@ -29,6 +29,10 @@ def web_search(query: str, config: Dict[str, Any]) -> List[Dict]:
     if not query:
         raise ValueError("Search query cannot be empty")
     
+    # Mock mode for testing without network
+    if config.get('mock_mode', False):
+        return mock_search_results(query)
+    
     search_engine = config.get('search_engine', 'google')
     
     if search_engine == 'google':
@@ -209,6 +213,36 @@ def local_wiki_search(query: str, config: Dict[str, Any]) -> str:
     except Exception as e:
         print(f"[Search] Local wiki search error: {e}")
         return f"Error: Local wiki search failed - {str(e)}"
+
+
+def mock_search_results(query: str) -> List[Dict]:
+    """
+    Generate mock search results for testing without network.
+    
+    Args:
+        query: Search query string
+        
+    Returns:
+        List of mock search results
+    """
+    print(f"[Search] Mock mode: generating fake results for '{query}'")
+    return [
+        {
+            "title": f"Mock Result 1 for: {query}",
+            "link": f"https://example.com/result1?q={query.replace(' ', '+')}",
+            "snippet": f"This is a mock search result for the query '{query}'. It contains relevant information about the topic."
+        },
+        {
+            "title": f"Mock Result 2 for: {query}",
+            "link": f"https://example.org/result2?q={query.replace(' ', '+')}",
+            "snippet": f"Another mock result providing details about '{query}'. This simulates real search engine output."
+        },
+        {
+            "title": f"Mock Result 3 for: {query}",
+            "link": f"https://test.com/result3?q={query.replace(' ', '+')}",
+            "snippet": f"Third mock result for '{query}'. Use mock_mode=True in config to enable this feature."
+        }
+    ]
 
 
 if __name__ == "__main__":

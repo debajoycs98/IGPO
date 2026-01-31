@@ -1,5 +1,18 @@
 #!/bin/bash
 
+# ============================================================================
+# IGPO Training Script (with tool_server_ant)
+# ============================================================================
+# 
+# Debug Options:
+# --------------
+# To enable vectorized GT LogProb verification mode (compares vectorized vs original):
+#   export IGPO_VERIFY_VECTORIZED=true
+#
+# To use vectorized GT LogProb computation (more efficient for multi-turn):
+#   +algorithm.use_vectorized_gt_logprob=true
+#
+# ============================================================================
 
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export HYDRA_FULL_ERROR=1

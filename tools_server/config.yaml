@@ -2,6 +2,9 @@
 # IGPO Tool Server Configuration - Web Search Only (Lightweight Version)
 # =============================================================================
 
+# Mock Mode: Set to true to use fake search results (for testing without network)
+mock_mode: false
+
 # Search Engine: "google" (Serper API) or "bing" (Azure Bing)
 search_engine: "google"
 search_top_k: 10
