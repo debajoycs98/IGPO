@@ -65,10 +65,19 @@ class Handler:
         # Process each task
         for task in task_list:
             tool_call = task.get('tool_call', {})
-            if tool_call.get('name') == 'web_search':
-                task['content'] = self._handle_web_search(tool_call.get('arguments', {}))
+            # Ensure tool_call is a dict
+            if not isinstance(tool_call, dict):
+                task['content'] = f"Invalid tool_call format: expected dict, got {type(tool_call).__name__}"
+                continue
+            
+            tool_name = tool_call.get('name', '')
+            if tool_name == 'web_search':
+                arguments = tool_call.get('arguments', {})
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                task['content'] = self._handle_web_search(arguments)
             else:
-                task['content'] = f"Unknown tool: {tool_call.get('name', 'none')}"
+                task['content'] = f"Unknown tool: {tool_name}"
         
         print(f"[Handler] Completed in {time.time() - start_time:.2f}s")
         return task_list
@@ -79,10 +88,21 @@ class Handler:
         
         for task in task_list:
             tool_call = task.get('tool_call', {})
+            # Ensure tool_call is a dict
+            if not isinstance(tool_call, dict):
+                continue
             if tool_call.get('name') != 'web_search':
                 continue
             
-            for query in tool_call.get('arguments', {}).get('query', [])[:3]:
+            arguments = tool_call.get('arguments', {})
+            if not isinstance(arguments, dict):
+                continue
+            
+            query_list = arguments.get('query', [])
+            if not isinstance(query_list, list):
+                query_list = [query_list] if query_list else []
+            
+            for query in query_list[:3]:
                 if isinstance(query, str):
                     with self.cache_lock:
                         if query not in self.search_cache or not self._is_cache_valid(self.search_cache[query]):
@@ -109,7 +129,11 @@ class Handler:
     def _handle_web_search(self, arguments: Dict) -> List[Dict]:
         """Handle web_search tool call."""
         query_list = arguments.get('query', [])
-        if not isinstance(query_list, list):
+        
+        # Handle both single string and list of strings
+        if isinstance(query_list, str):
+            query_list = [query_list]
+        elif not isinstance(query_list, list):
             return []
         
         results = []
