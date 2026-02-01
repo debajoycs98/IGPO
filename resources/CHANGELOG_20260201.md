@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ## [Feb 01, 2026]
 
 ### 🔧 Bug Fixes
-- Introduced a simplified `tools_server` interface (inspired by [DeepResearcher](https://github.com/GAIR-NLP/DeepResearcher)), resolving the previous issue where the `tools_server` module could not be publicly released due to company policies
+- Introduced a simplified `tools_server` interface, resolving the previous issue where the `tools_server` module could not be publicly released due to company policies
 
 ### ✨ New Features
 
