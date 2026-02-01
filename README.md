@@ -14,7 +14,7 @@
 
 ## 📣 Latest News
 - **[Feb 01, 2026]**: 🔄 Codebase updated with new features. [See details](resources/CHANGELOG_20260201.md)
-- **[Jan 26, 2026]**: 🎉 Our **[IGPO](https://arxiv.org/abs/2510.14967)** paper has been accepted at ICLR 2026!
+- **[Jan 26, 2026]**: 🎉 Our **[IGPO](https://arxiv.org/abs/2510.14967)** paper has been accepted at **ICLR 2026**!
 - **[Oct 17, 2025]**: 📄 Our IGPO paper is now available on **[arXiv](https://arxiv.org/abs/2510.14967)** and **[Hugging Face](https://huggingface.co/papers/2510.14967)** daily paper.
 
 ## 💡 Method Overview
@@ -136,11 +136,11 @@ bash evaluate.sh
 ## 📄 Citation
 If you find our code or work useful for your research, please cite our work.
 ```bibtex
-@article{wang2025information,
-  title={Information Gain-based Policy Optimization: A Simple and Effective Approach for Multi-Turn LLM Agents},
+@inproceedings{wang2026information,
+  title={Information Gain-based Policy Optimization: A Simple and Effective Approach for Multi-Turn Search Agents},
   author={Wang, Guoqing and Dai, Sunhao and Ye, Guangze and Gan, Zeyu and Yao, Wei and Deng, Yong and Wu, Xiaofeng and Ying, Zhenzhe},
-  journal={arXiv preprint arXiv:2510.14967},
-  year={2025}
+  booktitle={The Fourteenth International Conference on Learning Representations},
+  year={2026}
 }
 ```
 
