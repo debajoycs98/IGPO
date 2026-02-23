@@ -12,7 +12,7 @@ search_region: "us"
 search_lang: "en"
 
 # Serper API (Google Search) - Get key from: https://serper.dev/
-serper_api_key: ""
+serper_api_key: "42a548911080e32c05ebfb36981677cda862bd41"
 
 # Azure Bing Search (alternative) - Get key from Azure Portal
 azure_bing_search_subscription_key: ""
