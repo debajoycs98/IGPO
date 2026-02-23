@@ -6,8 +6,8 @@ export RAY_memory_monitor_refresh_ms=0
 export PET_NODE_RANK=0
 
 # Project configuration
-export project_name="project_name"
-export experiment_name="experiment_name"
+export project_name="Search"
+export experiment_name="IGPO-Qwen2.5-7B-Instruct"
 
 # Model path (modify this to your model location)
 export MODEL_PATH="Qwen/Qwen2.5-7B-Instruct"
@@ -62,7 +62,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     +algorithm.curriculum_ig_init=1.0 \
     +algorithm.curriculum_ig_final=0.5 \
     algorithm.kl_ctrl.kl_coef=0.001 \
-    trainer.logger=['console','tensorboard'] \
+    trainer.logger=['console','wandb'] \
     trainer.project_name=${project_name} \
     trainer.experiment_name=${experiment_name} \
     trainer.val_before_train=false \

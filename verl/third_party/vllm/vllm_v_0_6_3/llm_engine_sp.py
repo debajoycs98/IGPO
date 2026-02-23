@@ -158,7 +158,7 @@ class LLMEngine(LLMEngine):
             observability_config,
             model_config.seed,
             model_config.served_model_name,
-            scheduler_config.use_v2_block_manager,
+            getattr(scheduler_config, 'use_v2_block_manager', True),
             scheduler_config.num_scheduler_steps,
             scheduler_config.chunked_prefill_enabled,
             scheduler_config.multi_step_stream_outputs,

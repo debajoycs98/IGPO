@@ -50,7 +50,14 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         self.module = module
         # For AsyncLLM, inference_engine and model_runner are defer intialized in vLLMAsyncRollout.load_model
         self.inference_engine = inference_engine
-        self.model_runner = inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner if inference_engine else None
+        if inference_engine is None:
+            self.model_runner = None
+        else:
+            executor = inference_engine.llm_engine.model_executor
+            if hasattr(executor, "driver_worker"):
+                self.model_runner = executor.driver_worker.worker.model_runner
+            else:
+                self.model_runner = executor.worker.model_runner
         self.model_config = model_config
         self.device_mesh = device_mesh
         self.offload_param = offload_param

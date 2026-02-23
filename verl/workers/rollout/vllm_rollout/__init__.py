@@ -38,7 +38,9 @@ else:
     package_version = get_version(package_name)
 ###
 
-if package_version <= "0.6.3":
+from packaging import version as vs
+
+if package_version and vs.parse(package_version) <= vs.parse("0.6.3.post1"):
     vllm_mode = "customized"
     from .fire_vllm_rollout import FIREvLLMRollout  # noqa: F401
     from .vllm_rollout import vLLMRollout  # noqa: F401

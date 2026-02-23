@@ -33,17 +33,144 @@ We introduce IGPO, a RL algorithm for fine-grained credit assignment in search a
 
 ### 1. Installation
 
+> **Tested on**: 8x NVIDIA A100-SXM4-80GB, CUDA 12.4, Driver 580.x, Python 3.10
+
+#### 1.1 Create conda environment
+
 ```bash
-git clone https://github.com/GuoqingWang1/IGPO
+git clone https://github.com/debajoycs98/IGPO.git
 cd IGPO
 
-conda create -n igpo python=3.10
+conda create -n igpo python=3.10 -y
 conda activate igpo
-
-pip install -r requirements.txt
-
-pip install -e .
 ```
+
+#### 1.2 Install PyTorch (CUDA 12.4)
+
+```bash
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+```
+
+#### 1.3 Install vLLM and Flash Attention
+
+```bash
+pip install vllm==0.6.3.post1
+pip install flash-attn==2.8.3 --no-build-isolation
+```
+
+#### 1.4 Install remaining dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+#### 1.5 Install verl (this repo) in editable mode
+
+```bash
+pip install -e . --no-deps
+```
+
+> **Note**: `--no-deps` prevents pip from overriding the pinned versions of torch/vllm installed above.
+
+#### 1.6 Install supplementary packages
+
+```bash
+pip install pyvers antlr4-python3-runtime==4.9.3 sentry-sdk platformdirs gitpython
+```
+
+#### 1.7 Pin transformers to 4.x
+
+The codebase is not yet compatible with `transformers` 5.x. Pin to 4.x:
+
+```bash
+pip install 'transformers>=4.43.0,<5.0.0'
+```
+
+#### 1.8 Apply vLLM 0.6.3.post1 compatibility patches
+
+The verl codebase requires 6 small patches to work with `vllm==0.6.3.post1`. Apply them as follows:
+
+<details>
+<summary><b>Patch 1: <code>verl/third_party/vllm/__init__.py</code></b> — recognize version string <code>0.6.3.post1</code></summary>
+
+```diff
+- elif package_version == "0.6.3" or package_version == "0.6.3+rocm624" or package_version == "0.6.3+rocm634":
++ elif package_version in ("0.6.3", "0.6.3.post1", "0.6.3+rocm624", "0.6.3+rocm634"):
+```
+
+</details>
+
+<details>
+<summary><b>Patch 2: <code>verl/workers/rollout/vllm_rollout/__init__.py</code></b> — use semantic version comparison</summary>
+
+```diff
+- if package_version <= "0.6.3":
++ from packaging import version as vs
++
++ if package_version and vs.parse(package_version) <= vs.parse("0.6.3.post1"):
+```
+
+</details>
+
+<details>
+<summary><b>Patch 3: <code>verl/workers/sharding_manager/fsdp_vllm.py</code></b> — fix model_runner access for SPMDGPUExecutor</summary>
+
+```diff
+- self.model_runner = inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner if inference_engine else None
++ if inference_engine is None:
++     self.model_runner = None
++ else:
++     executor = inference_engine.llm_engine.model_executor
++     if hasattr(executor, "driver_worker"):
++         self.model_runner = executor.driver_worker.worker.model_runner
++     else:
++         self.model_runner = executor.worker.model_runner
+```
+
+</details>
+
+<details>
+<summary><b>Patch 4: <code>verl/utils/vllm_utils.py</code></b> — make DeepseekV3ForCausalLM import optional</summary>
+
+```diff
+- from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM, DeepseekV3ForCausalLM
++ from vllm.model_executor.models.deepseek_v2 import DeepseekV2ForCausalLM
++ try:
++     from vllm.model_executor.models.deepseek_v2 import DeepseekV3ForCausalLM
++ except ImportError:
++     DeepseekV3ForCausalLM = None
+  from vllm.model_executor.models.qwen2_moe import Qwen2MoeForCausalLM
+- model_types = [Qwen2MoeForCausalLM, DeepseekV2ForCausalLM, DeepseekV3ForCausalLM]
++ model_types = [Qwen2MoeForCausalLM, DeepseekV2ForCausalLM]
++ if DeepseekV3ForCausalLM is not None:
++     model_types.append(DeepseekV3ForCausalLM)
+```
+
+</details>
+
+<details>
+<summary><b>Patch 5: <code>verl/workers/fsdp_workers.py</code></b> — make vLLMAsyncRollout import conditional</summary>
+
+```diff
+- from verl.workers.rollout.vllm_rollout import vllm_mode, vLLMAsyncRollout, vLLMRollout
++ from verl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
++ try:
++     from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
++ except ImportError:
++     vLLMAsyncRollout = None
+```
+
+</details>
+
+<details>
+<summary><b>Patch 6: <code>verl/third_party/vllm/vllm_v_0_6_3/llm_engine_sp.py</code></b> — handle removed attribute</summary>
+
+```diff
+- scheduler_config.use_v2_block_manager,
++ getattr(scheduler_config, 'use_v2_block_manager', True),
+```
+
+</details>
 
 ### 2. Configure Web Search API & Prompt Template
 
