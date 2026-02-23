@@ -39,7 +39,7 @@ install_requires = [
     "transformers",
     "wandb",
     "smolagents",
-    "vllm",
+    "vllm==0.6.3.post1",
     "triton>=3.1.0",
     "torch>=2.4.0",
 ]
