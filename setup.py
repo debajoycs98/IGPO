@@ -34,14 +34,14 @@ install_requires = [
     "pybind11",
     "pylatexenc",
     "ray[default]>=2.10",
-    "tensordict==0.6.2",
+    "tensordict>=0.6.0",
     "torchdata",
     "transformers",
     "wandb",
     "smolagents",
     "vllm",
-    "triton==3.1.0",
-    "torch==2.4.0+cu121"
+    "triton>=3.1.0",
+    "torch>=2.4.0",
 ]
 
 TEST_REQUIRES = ['pytest', 'yapf', 'py-spy']
