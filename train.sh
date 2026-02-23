@@ -4,6 +4,7 @@ export VLLM_ATTENTION_BACKEND=XFORMERS
 export HYDRA_FULL_ERROR=1
 export RAY_memory_monitor_refresh_ms=0
 export PET_NODE_RANK=0
+export WANDB_MODE=online
 
 # Project configuration
 export project_name="Search"
